@@ -1,18 +1,30 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import * as ImagePicker from "expo-image-picker";
 import {
   Alert,
   Image,
   ActivityIndicator,
+  Platform,
   Pressable,
   ScrollView,
+  Share,
   StyleSheet,
   Switch,
   Text,
   TextInput,
+  useWindowDimensions,
   View
 } from "react-native";
 import { emptyDraft, parseContactFromText, type ContactDraft, type ContactField } from "./contactParser";
+import {
+  buildSavedContact,
+  createContactSummary,
+  createVCard,
+  formatDateLabel,
+  getPrimaryLabel,
+  type SavedContactEntry
+} from "./contactActions";
+import { loadSavedContacts, saveSavedContacts } from "./historyStorage";
 import { extractTextFromImage } from "./ocr";
 import { theme } from "./theme";
 
@@ -23,6 +35,8 @@ type IntakeOption = {
   subtitle: string;
   badge: string;
 };
+
+type AssignmentMode = "replace" | "append";
 
 const intakeOptions: IntakeOption[] = [
   {
@@ -78,6 +92,8 @@ const defaultFieldConfidence: Record<ContactField, "high" | "medium" | "low"> = 
 };
 
 export function AppShell() {
+  const { width } = useWindowDimensions();
+  const isCompactScreen = width < 720;
   const [selectedIntake, setSelectedIntake] = useState<IntakeMode>("Scan from camera");
   const [draft, setDraft] = useState<ContactDraft>(emptyDraft);
   const [fieldConfidence, setFieldConfidence] = useState<Record<ContactField, "high" | "medium" | "low">>(defaultFieldConfidence);
@@ -90,6 +106,16 @@ export function AppShell() {
   const [rawOcrText, setRawOcrText] = useState("");
   const [ocrError, setOcrError] = useState("");
   const [isRunningOcr, setIsRunningOcr] = useState(false);
+  const [savedContacts, setSavedContacts] = useState<SavedContactEntry[]>([]);
+  const [lastSavedId, setLastSavedId] = useState("");
+  const [assignmentMode, setAssignmentMode] = useState<AssignmentMode>("replace");
+  const [showRawOcr, setShowRawOcr] = useState(false);
+  const [showAllOcrLines, setShowAllOcrLines] = useState(false);
+  const [showSavedContacts, setShowSavedContacts] = useState(false);
+
+  useEffect(() => {
+    setSavedContacts(loadSavedContacts());
+  }, []);
 
   const pipelineState = useMemo(() => {
     if (processingStage === "idle") {
@@ -260,6 +286,8 @@ export function AppShell() {
     setRawOcrText("");
     setOcrError("");
     setIsRunningOcr(false);
+    setShowRawOcr(false);
+    setShowAllOcrLines(false);
   }
 
   function setFieldValue(field: ContactField, value: string, confidence?: "high" | "medium" | "low") {
@@ -269,19 +297,104 @@ export function AppShell() {
     }
   }
 
-  function appendOcrLineToField(line: string) {
-    const nextValue = draft[activeAssignmentField]
+  function assignOcrLineToField(line: string) {
+    const nextValue = assignmentMode === "append" && draft[activeAssignmentField]
       ? `${draft[activeAssignmentField]} ${line}`.trim()
       : line;
 
     setFieldValue(activeAssignmentField, nextValue, "medium");
   }
 
+  function clearActiveAssignmentField() {
+    setFieldValue(activeAssignmentField, "", "low");
+  }
+
+  async function handleSaveContact() {
+    if (!selectedImageUri) {
+      return;
+    }
+
+    const hasEnoughData = Boolean(draft.fullName || draft.company || draft.email || draft.mobilePhone || draft.officePhone);
+    if (!hasEnoughData) {
+      Alert.alert("Need more detail", "Add at least a name, company, email, or phone number before saving this contact.");
+      return;
+    }
+
+    const savedEntry = buildSavedContact(draft, selectedIntake, createFollowUp);
+    const nextSavedContacts = [savedEntry, ...savedContacts].slice(0, 8);
+
+    setSavedContacts(nextSavedContacts);
+    saveSavedContacts(nextSavedContacts);
+    setLastSavedId(savedEntry.id);
+
+    if (saveToContacts) {
+      await exportSavedContact(savedEntry);
+    } else {
+      Alert.alert("Saved to recent contacts", `${getPrimaryLabel(savedEntry.draft)} is now pinned in the recent contacts panel.`);
+    }
+  }
+
+  async function exportSavedContact(entry: SavedContactEntry) {
+    const vCard = createVCard(entry.draft);
+    const fallbackLabel = getPrimaryLabel(entry.draft);
+
+    if (Platform.OS === "web" && typeof window !== "undefined" && typeof document !== "undefined") {
+      const blob = new Blob([vCard], { type: "text/vcard;charset=utf-8" });
+      const url = window.URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `${fallbackLabel.replace(/[^a-z0-9]+/gi, "-").toLowerCase() || "business-card-contact"}.vcf`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      document.body.removeChild(anchor);
+      window.URL.revokeObjectURL(url);
+
+      Alert.alert("Saved and exported", `${fallbackLabel} was saved to recent contacts and downloaded as a VCF file.`);
+      return;
+    }
+
+    try {
+      await Share.share({
+        title: fallbackLabel,
+        message: `${createContactSummary(entry.draft)}\n\n${vCard}`
+      });
+    } catch {
+      Alert.alert("Saved to recent contacts", `${fallbackLabel} was saved locally. Sharing the contact can be added in the next pass.`);
+      return;
+    }
+
+    Alert.alert("Saved and ready to share", `${fallbackLabel} was saved locally and prepared for contact sharing.`);
+  }
+
+  async function copySummary(entry: SavedContactEntry) {
+    const summary = createContactSummary(entry.draft);
+
+    if (Platform.OS === "web" && typeof navigator !== "undefined" && navigator.clipboard) {
+      await navigator.clipboard.writeText(summary);
+      Alert.alert("Copied", "The contact summary is now on your clipboard.");
+      return;
+    }
+
+    try {
+      await Share.share({
+        title: getPrimaryLabel(entry.draft),
+        message: summary
+      });
+    } catch {
+      Alert.alert("Share unavailable", "The summary is ready, but this platform could not open the share sheet.");
+    }
+  }
+
+  const visibleOcrLines = isCompactScreen && !showAllOcrLines ? ocrLines.slice(0, 5) : ocrLines;
+  const visibleSavedContacts = isCompactScreen && !showSavedContacts ? savedContacts.slice(0, 3) : savedContacts;
+
   return (
     <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
-      <View style={styles.hero}>
+      <View style={[styles.hero, isCompactScreen && styles.heroCompact]}>
         <Text style={styles.eyebrow}>Business Card Depot</Text>
-        <Text style={styles.title}>Capture cards, clean the details, and save the contact in one pass.</Text>
+        <Text style={[styles.title, isCompactScreen && styles.titleCompact]}>
+          Capture cards, clean the details, and save the contact in one pass.
+        </Text>
         <Text style={styles.body}>
           This build now supports real intake from the camera or image library and hands the selected card
           into the contact review flow.
@@ -289,7 +402,7 @@ export function AppShell() {
       </View>
 
       <View style={styles.sectionCard}>
-        <View style={styles.sectionHead}>
+        <View style={[styles.sectionHead, isCompactScreen && styles.sectionHeadCompact]}>
           <Text style={styles.sectionTitle}>Choose intake source</Text>
           <Text style={styles.sectionMeta}>Step 1</Text>
         </View>
@@ -321,7 +434,7 @@ export function AppShell() {
       </View>
 
       <View style={styles.sectionCard}>
-        <View style={styles.sectionHead}>
+        <View style={[styles.sectionHead, isCompactScreen && styles.sectionHeadCompact]}>
           <Text style={styles.sectionTitle}>Selected card</Text>
           <Text style={styles.sectionMeta}>Preview</Text>
         </View>
@@ -355,9 +468,9 @@ export function AppShell() {
         )}
       </View>
 
-      <View style={styles.dualColumn}>
+      <View style={[styles.dualColumn, isCompactScreen && styles.dualColumnCompact]}>
         <View style={styles.sectionCardWide}>
-          <View style={styles.sectionHead}>
+          <View style={[styles.sectionHead, isCompactScreen && styles.sectionHeadCompact]}>
             <Text style={styles.sectionTitle}>Extraction pipeline</Text>
             <Text style={styles.sectionMeta}>Step 2</Text>
           </View>
@@ -374,24 +487,32 @@ export function AppShell() {
             <MetricCard label="Fields found" value={pipelineState.fieldsFound} />
             <MetricCard label="Needs review" value={pipelineState.needsReview} />
           </View>
+          {isCompactScreen ? (
+            <View style={styles.compactStatusBox}>
+              <Text style={styles.compactStatusTitle}>{selectedImageUri ? "Card ready" : "Waiting"}</Text>
+              <Text style={styles.queueText}>Current source: {selectedIntake}</Text>
+            </View>
+          ) : null}
         </View>
 
-        <View style={styles.sectionCardCompact}>
-          <View style={styles.sectionHead}>
-            <Text style={styles.sectionTitle}>Queue status</Text>
-            <Text style={styles.sectionMeta}>Live</Text>
+        {!isCompactScreen ? (
+          <View style={styles.sectionCardCompact}>
+            <View style={styles.sectionHead}>
+              <Text style={styles.sectionTitle}>Queue status</Text>
+              <Text style={styles.sectionMeta}>Live</Text>
+            </View>
+            <Text style={styles.queueHeadline}>{selectedImageUri ? "Card ready" : "Waiting"}</Text>
+            <Text style={styles.queueText}>Current source: {selectedIntake}</Text>
+            <Text style={styles.queueText}>
+              Next milestone: make the confidence flags and OCR line assignment fast enough for one-handed cleanup.
+            </Text>
           </View>
-          <Text style={styles.queueHeadline}>{selectedImageUri ? "Card ready" : "Waiting"}</Text>
-          <Text style={styles.queueText}>Current source: {selectedIntake}</Text>
-          <Text style={styles.queueText}>
-            Next milestone: make the confidence flags and OCR line assignment fast enough for one-handed cleanup.
-          </Text>
-        </View>
+        ) : null}
       </View>
 
       {(ocrError || rawOcrText) ? (
         <View style={styles.sectionCard}>
-          <View style={styles.sectionHead}>
+          <View style={[styles.sectionHead, isCompactScreen && styles.sectionHeadCompact]}>
             <Text style={styles.sectionTitle}>OCR output</Text>
             <Text style={styles.sectionMeta}>Debug</Text>
           </View>
@@ -404,15 +525,27 @@ export function AppShell() {
           ) : null}
 
           {rawOcrText ? (
-            <View style={styles.rawTextBox}>
-              <Text style={styles.rawText}>{rawOcrText}</Text>
-            </View>
+            <>
+              <Pressable
+                style={styles.togglePanelButton}
+                onPress={() => setShowRawOcr(current => !current)}
+              >
+                <Text style={styles.togglePanelButtonText}>
+                  {showRawOcr ? "Hide raw OCR text" : "Show raw OCR text"}
+                </Text>
+              </Pressable>
+              {showRawOcr ? (
+                <View style={styles.rawTextBox}>
+                  <Text style={styles.rawText}>{rawOcrText}</Text>
+                </View>
+              ) : null}
+            </>
           ) : null}
         </View>
       ) : null}
 
       <View style={styles.sectionCard}>
-        <View style={styles.sectionHead}>
+        <View style={[styles.sectionHead, isCompactScreen && styles.sectionHeadCompact]}>
           <Text style={styles.sectionTitle}>Review extracted contact</Text>
           <Text style={styles.sectionMeta}>Step 3</Text>
         </View>
@@ -454,17 +587,20 @@ export function AppShell() {
 
       {ocrLines.length > 0 ? (
         <View style={styles.sectionCard}>
-          <View style={styles.sectionHead}>
+          <View style={[styles.sectionHead, isCompactScreen && styles.sectionHeadCompact]}>
             <Text style={styles.sectionTitle}>Quick assign from OCR lines</Text>
             <Text style={styles.sectionMeta}>Step 3A</Text>
           </View>
 
           <Text style={styles.assignHelp}>
-            Pick a target field, then tap any OCR line to push it straight into that field. Use this when the OCR got
-            close but not quite right.
+            Pick a target field, choose whether a tap should replace or append, then tap the OCR line you want.
           </Text>
 
-          <View style={styles.assignmentFieldRow}>
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.horizontalChipRow}
+          >
             {assignableFields.map(field => {
               const isActive = field.key === activeAssignmentField;
               return (
@@ -479,7 +615,7 @@ export function AppShell() {
                 </Pressable>
               );
             })}
-          </View>
+          </ScrollView>
 
           <View style={styles.assignmentTargetBox}>
             <Text style={styles.assignmentTargetLabel}>Assigning to</Text>
@@ -488,11 +624,33 @@ export function AppShell() {
             </Text>
           </View>
 
+          <View style={styles.assignmentModeRow}>
+            <Pressable
+              style={[styles.assignmentModeChip, assignmentMode === "replace" && styles.assignmentModeChipActive]}
+              onPress={() => setAssignmentMode("replace")}
+            >
+              <Text style={[styles.assignmentModeText, assignmentMode === "replace" && styles.assignmentModeTextActive]}>
+                Replace
+              </Text>
+            </Pressable>
+            <Pressable
+              style={[styles.assignmentModeChip, assignmentMode === "append" && styles.assignmentModeChipActive]}
+              onPress={() => setAssignmentMode("append")}
+            >
+              <Text style={[styles.assignmentModeText, assignmentMode === "append" && styles.assignmentModeTextActive]}>
+                Append
+              </Text>
+            </Pressable>
+            <Pressable style={styles.assignmentClearChip} onPress={clearActiveAssignmentField}>
+              <Text style={styles.assignmentClearText}>Clear field</Text>
+            </Pressable>
+          </View>
+
           <View style={styles.lineStack}>
-            {ocrLines.map((line, index) => (
+            {visibleOcrLines.map((line, index) => (
               <Pressable
                 key={`${line}-${index}`}
-                onPress={() => appendOcrLineToField(line)}
+                onPress={() => assignOcrLineToField(line)}
                 style={styles.lineCard}
               >
                 <Text style={styles.lineIndex}>Line {index + 1}</Text>
@@ -500,11 +658,22 @@ export function AppShell() {
               </Pressable>
             ))}
           </View>
+
+          {isCompactScreen && ocrLines.length > 5 ? (
+            <Pressable
+              style={styles.togglePanelButton}
+              onPress={() => setShowAllOcrLines(current => !current)}
+            >
+              <Text style={styles.togglePanelButtonText}>
+                {showAllOcrLines ? "Show fewer OCR lines" : `Show all ${ocrLines.length} OCR lines`}
+              </Text>
+            </Pressable>
+          ) : null}
         </View>
       ) : null}
 
       <View style={styles.sectionCard}>
-        <View style={styles.sectionHead}>
+        <View style={[styles.sectionHead, isCompactScreen && styles.sectionHeadCompact]}>
           <Text style={styles.sectionTitle}>Save options</Text>
           <Text style={styles.sectionMeta}>Step 4</Text>
         </View>
@@ -539,6 +708,9 @@ export function AppShell() {
           <Pressable
             style={[styles.actionButton, styles.primaryButton, !selectedImageUri && styles.buttonDisabled]}
             disabled={!selectedImageUri || isRunningOcr}
+            onPress={() => {
+              void handleSaveContact();
+            }}
           >
             <Text style={styles.primaryButtonText}>Save contact</Text>
           </Pressable>
@@ -546,6 +718,100 @@ export function AppShell() {
             <Text style={styles.secondaryButtonText}>Scan another card</Text>
           </Pressable>
         </View>
+      </View>
+
+      <View style={styles.sectionCard}>
+        <View style={[styles.sectionHead, isCompactScreen && styles.sectionHeadCompact]}>
+          <Text style={styles.sectionTitle}>Recent saved contacts</Text>
+          <Text style={styles.sectionMeta}>{savedContacts.length ? `${savedContacts.length} saved` : "Empty"}</Text>
+        </View>
+
+        {savedContacts.length === 0 ? (
+          <View style={styles.emptyPreview}>
+            <Text style={styles.emptyPreviewTitle}>No saved contacts yet</Text>
+            <Text style={styles.emptyPreviewBody}>
+              Save a cleaned contact and it will stay here for quick export, reuse, and handoff.
+            </Text>
+          </View>
+        ) : (
+          <View style={styles.savedStack}>
+            {visibleSavedContacts.map(entry => {
+              const isLatest = entry.id === lastSavedId;
+
+              return (
+                <View key={entry.id} style={[styles.savedCard, isLatest && styles.savedCardLatest]}>
+                  <View style={styles.savedHeader}>
+                    <View style={styles.savedCopy}>
+                      <Text style={styles.savedName}>{getPrimaryLabel(entry.draft)}</Text>
+                      <Text style={styles.savedMeta}>
+                        {entry.draft.title || "Contact"}{entry.draft.company ? ` at ${entry.draft.company}` : ""}
+                      </Text>
+                      <Text style={styles.savedMeta}>
+                        Saved {formatDateLabel(entry.savedAt)} from {entry.source}
+                      </Text>
+                    </View>
+                    {isLatest ? (
+                      <View style={styles.latestChip}>
+                        <Text style={styles.latestChipText}>Newest</Text>
+                      </View>
+                    ) : null}
+                  </View>
+
+                  <View style={styles.savedActionRow}>
+                    <Pressable
+                      style={[styles.savedActionButton, styles.savedActionPrimary]}
+                      onPress={() => {
+                        void exportSavedContact(entry);
+                      }}
+                    >
+                      <Text style={styles.savedActionPrimaryText}>Export VCF</Text>
+                    </Pressable>
+                    <Pressable
+                      style={[styles.savedActionButton, styles.savedActionSecondary]}
+                      onPress={() => {
+                        void copySummary(entry);
+                      }}
+                    >
+                      <Text style={styles.savedActionSecondaryText}>Copy summary</Text>
+                    </Pressable>
+                    <Pressable
+                      style={[styles.savedActionButton, styles.savedActionSecondary]}
+                      onPress={() => {
+                        setDraft(entry.draft);
+                        setSelectedIntake(entry.source as IntakeMode);
+                        setProcessingStage("review");
+                        setFieldConfidence({
+                          fullName: "medium",
+                          company: "medium",
+                          title: "medium",
+                          mobilePhone: "medium",
+                          officePhone: "medium",
+                          email: "medium",
+                          website: "medium",
+                          address: "medium",
+                          notes: "medium"
+                        });
+                      }}
+                    >
+                      <Text style={styles.savedActionSecondaryText}>Load into review</Text>
+                    </Pressable>
+                  </View>
+                </View>
+              );
+            })}
+
+            {isCompactScreen && savedContacts.length > 3 ? (
+              <Pressable
+                style={styles.togglePanelButton}
+                onPress={() => setShowSavedContacts(current => !current)}
+              >
+                <Text style={styles.togglePanelButtonText}>
+                  {showSavedContacts ? "Show fewer saved contacts" : `Show all ${savedContacts.length} saved contacts`}
+                </Text>
+              </Pressable>
+            ) : null}
+          </View>
+        )}
       </View>
     </ScrollView>
   );
@@ -612,6 +878,9 @@ const styles = StyleSheet.create({
     borderColor: theme.colors.border,
     gap: theme.spacing.md
   },
+  heroCompact: {
+    padding: theme.spacing.lg
+  },
   eyebrow: {
     fontSize: 12,
     fontWeight: "700",
@@ -624,6 +893,10 @@ const styles = StyleSheet.create({
     lineHeight: 36,
     fontWeight: "800",
     color: theme.colors.text
+  },
+  titleCompact: {
+    fontSize: 24,
+    lineHeight: 30
   },
   body: {
     fontSize: 16,
@@ -661,6 +934,9 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     alignItems: "center",
     gap: theme.spacing.sm
+  },
+  sectionHeadCompact: {
+    alignItems: "flex-start"
   },
   sectionTitle: {
     fontSize: 20,
@@ -803,6 +1079,9 @@ const styles = StyleSheet.create({
   dualColumn: {
     gap: theme.spacing.md
   },
+  dualColumnCompact: {
+    flexDirection: "column"
+  },
   pipelineRow: {
     flexDirection: "row",
     flexWrap: "wrap",
@@ -871,6 +1150,19 @@ const styles = StyleSheet.create({
     lineHeight: 21,
     color: theme.colors.muted
   },
+  compactStatusBox: {
+    padding: theme.spacing.md,
+    borderRadius: theme.radius.md,
+    backgroundColor: theme.colors.surfaceStrong,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    gap: theme.spacing.xs
+  },
+  compactStatusTitle: {
+    fontSize: 18,
+    fontWeight: "800",
+    color: theme.colors.brandStrong
+  },
   formGrid: {
     gap: theme.spacing.md
   },
@@ -937,6 +1229,10 @@ const styles = StyleSheet.create({
     lineHeight: 20,
     color: theme.colors.muted
   },
+  horizontalChipRow: {
+    gap: theme.spacing.sm,
+    paddingRight: theme.spacing.sm
+  },
   assignmentFieldRow: {
     flexDirection: "row",
     flexWrap: "wrap",
@@ -981,6 +1277,44 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: "800",
     color: theme.colors.text
+  },
+  assignmentModeRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: theme.spacing.sm
+  },
+  assignmentModeChip: {
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: 10,
+    borderRadius: 999,
+    backgroundColor: theme.colors.surfaceStrong,
+    borderWidth: 1,
+    borderColor: theme.colors.border
+  },
+  assignmentModeChipActive: {
+    backgroundColor: theme.colors.brandSoft,
+    borderColor: theme.colors.brand
+  },
+  assignmentModeText: {
+    fontSize: 13,
+    fontWeight: "700",
+    color: theme.colors.muted
+  },
+  assignmentModeTextActive: {
+    color: theme.colors.brandStrong
+  },
+  assignmentClearChip: {
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: 10,
+    borderRadius: 999,
+    backgroundColor: theme.colors.errorSoft,
+    borderWidth: 1,
+    borderColor: theme.colors.errorBorder
+  },
+  assignmentClearText: {
+    fontSize: 13,
+    fontWeight: "700",
+    color: theme.colors.error
   },
   lineStack: {
     gap: theme.spacing.sm
@@ -1057,6 +1391,96 @@ const styles = StyleSheet.create({
   },
   secondaryButtonText: {
     fontSize: 16,
+    fontWeight: "800",
+    color: theme.colors.text
+  },
+  togglePanelButton: {
+    minHeight: 44,
+    paddingHorizontal: theme.spacing.md,
+    borderRadius: 999,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: theme.colors.surfaceStrong,
+    borderWidth: 1,
+    borderColor: theme.colors.border
+  },
+  togglePanelButtonText: {
+    fontSize: 14,
+    fontWeight: "700",
+    color: theme.colors.brandStrong
+  },
+  savedStack: {
+    gap: theme.spacing.md
+  },
+  savedCard: {
+    padding: theme.spacing.md,
+    borderRadius: theme.radius.md,
+    backgroundColor: theme.colors.surfaceStrong,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    gap: theme.spacing.md
+  },
+  savedCardLatest: {
+    borderColor: theme.colors.brand
+  },
+  savedHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "flex-start",
+    gap: theme.spacing.md
+  },
+  savedCopy: {
+    flex: 1,
+    gap: theme.spacing.xs
+  },
+  savedName: {
+    fontSize: 18,
+    fontWeight: "800",
+    color: theme.colors.text
+  },
+  savedMeta: {
+    fontSize: 14,
+    lineHeight: 20,
+    color: theme.colors.muted
+  },
+  latestChip: {
+    paddingHorizontal: theme.spacing.sm,
+    paddingVertical: 6,
+    borderRadius: 999,
+    backgroundColor: theme.colors.brandSoft
+  },
+  latestChipText: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: theme.colors.brandStrong
+  },
+  savedActionRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: theme.spacing.sm
+  },
+  savedActionButton: {
+    minHeight: 44,
+    paddingHorizontal: theme.spacing.md,
+    borderRadius: 999,
+    alignItems: "center",
+    justifyContent: "center"
+  },
+  savedActionPrimary: {
+    backgroundColor: theme.colors.brand
+  },
+  savedActionSecondary: {
+    backgroundColor: theme.colors.surface,
+    borderWidth: 1,
+    borderColor: theme.colors.border
+  },
+  savedActionPrimaryText: {
+    fontSize: 14,
+    fontWeight: "800",
+    color: "#ffffff"
+  },
+  savedActionSecondaryText: {
+    fontSize: 14,
     fontWeight: "800",
     color: theme.colors.text
   }

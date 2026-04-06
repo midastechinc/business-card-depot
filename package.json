@@ -13,6 +13,8 @@
   },
   "dependencies": {
     "@expo/metro-runtime": "~3.2.3",
+    "@infinitered/react-native-mlkit-core": "^3.1.0",
+    "@infinitered/react-native-mlkit-text-recognition": "^1.1.0",
     "expo": "~51.0.0",
     "expo-image-picker": "~15.0.7",
     "expo-status-bar": "~1.12.1",
