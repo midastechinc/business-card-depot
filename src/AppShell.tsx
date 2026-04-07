@@ -25,6 +25,7 @@ import {
   saveDraftToNativeContacts,
   type SavedContactEntry
 } from "./contactActions";
+import { defaultAdminSettings, loadAdminSettings, saveAdminSettings, type AdminSettings } from "./adminSettings";
 import {
   emptyDraft,
   parseContactFromOcr,
@@ -33,12 +34,13 @@ import {
   type ParsedContactResult
 } from "./contactParser";
 import { loadSavedContacts, saveSavedContacts } from "./historyStorage";
+import { syncSavedContactToList } from "./listSync";
 import { extractOcrPayloadFromImage } from "./ocr";
 import { theme } from "./theme";
 
 type IntakeMode = "Scan from camera" | "Import image" | "Import screenshot";
 type AssignmentMode = "replace" | "append";
-type CompactPanel = "capture" | "review" | "fix" | "saved";
+type CompactPanel = "capture" | "review" | "fix" | "saved" | "admin";
 
 const intakeOptions: Array<{ title: IntakeMode; subtitle: string; badge: string }> = [
   { title: "Scan from camera", subtitle: "Capture a physical card with the phone camera.", badge: "Camera" },
@@ -50,7 +52,8 @@ const compactPanels: Array<{ key: CompactPanel; label: string }> = [
   { key: "capture", label: "Capture" },
   { key: "review", label: "Review" },
   { key: "fix", label: "Fix" },
-  { key: "saved", label: "Saved" }
+  { key: "saved", label: "Saved" },
+  { key: "admin", label: "Admin" }
 ];
 
 const fieldOrder: Array<{ key: keyof ContactDraft; label: string; keyboard?: "default" | "email-address" | "phone-pad" | "url" }> = [
@@ -114,10 +117,35 @@ export function AppShell() {
   const [compactPanel, setCompactPanel] = useState<CompactPanel>("capture");
   const [isDragActive, setIsDragActive] = useState(false);
   const [managedObjectUrl, setManagedObjectUrl] = useState("");
+  const [adminSettings, setAdminSettings] = useState<AdminSettings>(defaultAdminSettings);
+  const [settingsReady, setSettingsReady] = useState(false);
+  const [syncState, setSyncState] = useState<{ status: "idle" | "syncing" | "success" | "error"; message: string }>({
+    status: "idle",
+    message: ""
+  });
 
   useEffect(() => {
     setSavedContacts(loadSavedContacts());
   }, []);
+
+  useEffect(() => {
+    let mounted = true;
+
+    void loadAdminSettings().then(settings => {
+      if (!mounted) return;
+      setAdminSettings(settings);
+      setSettingsReady(true);
+    });
+
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!settingsReady) return;
+    void saveAdminSettings(adminSettings);
+  }, [adminSettings, settingsReady]);
 
   const pipelineState = useMemo(() => {
     if (processingStage === "idle") return { confidence: "--", fieldsFound: "0/9", needsReview: "Waiting", ocrStatus: "pending" as const };
@@ -353,6 +381,44 @@ export function AppShell() {
       await exportSavedContact(savedEntry);
     } else {
       Alert.alert("Saved", `${getPrimaryLabel(savedEntry.draft)} is now in recent saved contacts.`);
+    }
+
+    if (adminSettings.enableListSync && adminSettings.listDatabaseUrl.trim()) {
+      setSyncState({ status: "syncing", message: "Syncing to list database..." });
+      try {
+        await syncSavedContactToList(savedEntry, adminSettings.listDatabaseUrl);
+        setSyncState({ status: "success", message: "Saved contact also synced to the list database." });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Could not sync this contact to the list database.";
+        setSyncState({ status: "error", message });
+      }
+    }
+  }
+
+  async function sendTestSync() {
+    if (!adminSettings.listDatabaseUrl.trim()) {
+      Alert.alert("Missing URL", "Add the list database URL first.");
+      return;
+    }
+
+    const sampleEntry = buildSavedContact(
+      {
+        ...draft,
+        fullName: draft.fullName || "Business Card Depot Test Contact",
+        company: draft.company || "Midas Tech",
+        title: draft.title || "Sync Test"
+      },
+      "Admin test",
+      false
+    );
+
+    setSyncState({ status: "syncing", message: "Sending test payload..." });
+    try {
+      await syncSavedContactToList(sampleEntry, adminSettings.listDatabaseUrl);
+      setSyncState({ status: "success", message: "Test payload sent successfully." });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "The test payload could not be sent.";
+      setSyncState({ status: "error", message });
     }
   }
 
@@ -773,6 +839,76 @@ export function AppShell() {
                 ) : null}
               </View>
             )}
+          </View>
+        ) : null}
+
+        {shouldShowPanel("admin") ? (
+          <View style={styles.cardPanel}>
+            <PanelHeader title="5. Admin" meta="Optional sync" />
+
+            <View style={styles.toggleRow}>
+              <View style={styles.toggleCopy}>
+                <Text style={styles.toggleTitle}>Sync saved cards to list database</Text>
+                <Text style={styles.toggleBody}>If enabled, every saved contact will also POST to the URL below.</Text>
+              </View>
+              <Switch
+                value={adminSettings.enableListSync}
+                onValueChange={value => setAdminSettings(current => ({ ...current, enableListSync: value }))}
+                trackColor={{ false: "#d5cab9", true: "#83b3df" }}
+                thumbColor={adminSettings.enableListSync ? theme.colors.brand : "#f7f3ed"}
+              />
+            </View>
+
+            <View style={styles.fieldBlock}>
+              <Text style={styles.fieldLabel}>List database URL</Text>
+              <TextInput
+                value={adminSettings.listDatabaseUrl}
+                onChangeText={value => setAdminSettings(current => ({ ...current, listDatabaseUrl: value }))}
+                style={styles.input}
+                placeholder="https://your-list-endpoint.example.com/cards"
+                placeholderTextColor={theme.colors.placeholder}
+                autoCapitalize="none"
+                keyboardType="url"
+              />
+            </View>
+
+            <View style={styles.previewCard}>
+              <Text style={styles.previewEmptyTitle}>Expected payload</Text>
+              <Text style={styles.previewEmptyBody}>The app sends a JSON POST with `sourceApp`, `savedAt`, `source`, and `contact` fields.</Text>
+            </View>
+
+            {syncState.status !== "idle" ? (
+              <View style={[
+                styles.syncStateBox,
+                syncState.status === "success" ? styles.syncStateSuccess : syncState.status === "error" ? styles.syncStateError : styles.syncStateProgress
+              ]}>
+                <Text style={styles.syncStateTitle}>
+                  {syncState.status === "success" ? "Last sync ok" : syncState.status === "error" ? "Sync error" : "Sync in progress"}
+                </Text>
+                <Text style={styles.syncStateBody}>{syncState.message}</Text>
+              </View>
+            ) : null}
+
+            <View style={styles.actionRow}>
+              <Pressable
+                style={[styles.actionButton, styles.primaryButton, !adminSettings.listDatabaseUrl.trim() && styles.buttonDisabled]}
+                disabled={!adminSettings.listDatabaseUrl.trim()}
+                onPress={() => {
+                  void sendTestSync();
+                }}
+              >
+                <Text style={styles.primaryButtonText}>Send test payload</Text>
+              </Pressable>
+              <Pressable
+                style={[styles.actionButton, styles.secondaryButton]}
+                onPress={() => {
+                  setAdminSettings(defaultAdminSettings);
+                  setSyncState({ status: "idle", message: "" });
+                }}
+              >
+                <Text style={styles.secondaryButtonText}>Reset admin</Text>
+              </Pressable>
+            </View>
           </View>
         ) : null}
       </View>
@@ -1375,6 +1511,30 @@ const styles = StyleSheet.create({
   },
   errorBody: {
     color: theme.colors.error,
+    fontSize: 13,
+    lineHeight: 19
+  },
+  syncStateBox: {
+    borderRadius: 18,
+    padding: 14,
+    gap: 5
+  },
+  syncStateProgress: {
+    backgroundColor: "#eef5fb"
+  },
+  syncStateSuccess: {
+    backgroundColor: "#e8f4ea"
+  },
+  syncStateError: {
+    backgroundColor: "#fde0db"
+  },
+  syncStateTitle: {
+    color: theme.colors.text,
+    fontSize: 15,
+    fontWeight: "800"
+  },
+  syncStateBody: {
+    color: theme.colors.muted,
     fontSize: 13,
     lineHeight: 19
   },

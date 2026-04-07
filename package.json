@@ -15,6 +15,7 @@
     "@expo/metro-runtime": "~3.2.3",
     "@infinitered/react-native-mlkit-core": "^3.1.0",
     "@infinitered/react-native-mlkit-text-recognition": "^1.1.0",
+    "@react-native-async-storage/async-storage": "1.23.1",
     "expo": "~51.0.0",
     "expo-contacts": "~13.0.5",
     "expo-image": "~1.13.0",
