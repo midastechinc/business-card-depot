@@ -1,5 +1,14 @@
 import type { AdminSettings } from "./adminSettings";
 import type { ContactDraft, ContactField, ParsedContactResult } from "./contactParser";
+import {
+  dedupeTextValues,
+  isValidEmail,
+  isValidWebsite,
+  normalizeAcceptedPhoneValue,
+  normalizeAddressValue,
+  normalizeComparable,
+  normalizeWebsiteValue
+} from "./fieldValidators";
 
 type Confidence = "high" | "medium" | "low";
 type SourceType = "card" | "screenshot";
@@ -27,18 +36,6 @@ type AiVerificationResponse = {
   fieldConfidence: Partial<Record<ContactField, Confidence>>;
   suggestions: Partial<Record<ContactField, string[]>>;
   reviewSummary: string;
-};
-
-const fieldLabels: Record<ContactField, string> = {
-  fullName: "Full Name",
-  company: "Company",
-  title: "Title",
-  mobilePhone: "Mobile Phone",
-  officePhone: "Office Phone",
-  email: "Email",
-  website: "Website",
-  address: "Address",
-  notes: "Notes"
 };
 
 const fieldOrder: ContactField[] = [
@@ -180,7 +177,7 @@ export function mergeAiVerificationIntoParsed(
       fieldConfidence[field] = aiConfidence;
     }
 
-    suggestions[field] = dedupe([
+    suggestions[field] = dedupeTextValues([
       draft[field],
       ...(aiResult.suggestions[field] ?? []),
       ...(parsedResult.suggestions[field] ?? [])
@@ -188,7 +185,7 @@ export function mergeAiVerificationIntoParsed(
   });
 
   if (aiResult.reviewSummary) {
-    draft.notes = dedupe([draft.notes, aiResult.reviewSummary]).join(" | ");
+    draft.notes = dedupeTextValues([draft.notes, aiResult.reviewSummary]).join(" | ");
   }
 
   return {
@@ -255,7 +252,7 @@ function normalizeFieldPayload(field: ContactField, payload: unknown) {
   const value = "value" in payload && typeof payload.value === "string" ? normalizeFieldValue(field, payload.value) : "";
   const confidence = "confidence" in payload && isConfidence(payload.confidence) ? payload.confidence : undefined;
   const alternatives = "alternatives" in payload && Array.isArray(payload.alternatives)
-    ? dedupe(payload.alternatives.filter((item): item is string => typeof item === "string").map(item => normalizeFieldValue(field, item))).filter(Boolean)
+    ? dedupeTextValues(payload.alternatives.filter((item): item is string => typeof item === "string").map(item => normalizeFieldValue(field, item))).filter(Boolean)
     : [];
 
   return { value, confidence, alternatives };
@@ -289,10 +286,12 @@ function normalizeFieldValue(field: ContactField, value: string) {
     case "email":
       return isValidEmail(trimmed) ? trimmed.toLowerCase() : "";
     case "website":
-      return isValidWebsite(trimmed) ? trimmed.replace(/^https?:\/\//i, "") : "";
+      return normalizeWebsiteValue(trimmed);
     case "mobilePhone":
     case "officePhone":
-      return isValidPhone(trimmed) ? trimmed.replace(/\s+/g, " ").trim() : "";
+      return normalizeAcceptedPhoneValue(trimmed);
+    case "address":
+      return normalizeAddressValue(trimmed);
     default:
       return trimmed;
   }
@@ -304,31 +303,4 @@ function isConfidence(value: unknown): value is Confidence {
 
 function rankConfidence(value: Confidence) {
   return value === "high" ? 3 : value === "medium" ? 2 : 1;
-}
-
-function dedupe(values: string[]) {
-  const seen = new Set<string>();
-  return values.filter(value => {
-    const normalized = normalizeComparable(value);
-    if (!normalized || seen.has(normalized)) return false;
-    seen.add(normalized);
-    return true;
-  });
-}
-
-function normalizeComparable(value: string) {
-  return value.trim().toLowerCase().replace(/\s+/g, " ");
-}
-
-function isValidEmail(value: string) {
-  return /^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$/i.test(value);
-}
-
-function isValidWebsite(value: string) {
-  return /^(?:https?:\/\/)?(?:www\.)?[a-z0-9-]+\.[a-z]{2,}(?:\/[^\s]*)?$/i.test(value);
-}
-
-function isValidPhone(value: string) {
-  const digits = value.replace(/\D/g, "");
-  return digits.length >= 10 && digits.length <= 12;
 }

@@ -1,3 +1,17 @@
+import {
+  cleanOcrTextLine,
+  dedupeTextValues,
+  extractWebsiteFromText,
+  isValidEmail,
+  isValidWebsite,
+  looksGeoSpecificValue,
+  looksLikeAddressContinuationValue,
+  looksLikeAddressValue,
+  normalizeAcceptedPhoneValue,
+  normalizeAddressValue,
+  normalizeComparable
+} from "./fieldValidators";
+
 export type ContactDraft = {
   fullName: string;
   company: string;
@@ -152,29 +166,6 @@ const COMPANY_WORDS = [
   "university"
 ];
 
-const ADDRESS_WORDS = [
-  "street",
-  "st",
-  "road",
-  "rd",
-  "avenue",
-  "ave",
-  "boulevard",
-  "blvd",
-  "drive",
-  "dr",
-  "suite",
-  "unit",
-  "floor",
-  "court",
-  "way",
-  "plaza",
-  "canada",
-  "ontario",
-  "alberta",
-  "quebec"
-];
-
 export function parseContactFromText(text: string, sourceType: SourceType = "card"): ParsedContactResult {
   return parseContactFromOcr(
     {
@@ -291,7 +282,7 @@ function normalizeLines(inputLines: OcrInputLine[], fallbackText: string) {
   const fullWidth = Math.max(maxRight - minLeft, 1);
 
   return positioned.map((line, index): NormalizedLine => {
-    const cleaned = cleanOcrLine(line.raw);
+    const cleaned = cleanOcrTextLine(line.raw);
     const lower = cleaned.toLowerCase();
     const widthScore = clamp((line.right - line.left) / fullWidth);
     const topScore = clamp(line.top / maxTop);
@@ -314,18 +305,6 @@ function normalizeLines(inputLines: OcrInputLine[], fallbackText: string) {
       isUpperCaseish: cleaned === cleaned.toUpperCase() && /[A-Z]/.test(cleaned)
     };
   });
-}
-
-function cleanOcrLine(value: string) {
-  return value
-    .replace(/\s+/g, " ")
-    .replace(/[•·]/g, " ")
-    .replace(/\s*\|\s*/g, " | ")
-    .replace(/\bwww\s+/gi, "www.")
-    .replace(/\s*@\s*/g, "@")
-    .replace(/[^\S\r\n]+/g, " ")
-    .replace(/[|]{2,}/g, "|")
-    .trim();
 }
 
 function extractLabels(lower: string) {
@@ -363,7 +342,7 @@ function buildWebsiteCandidates(lines: NormalizedLine[], text: string) {
     confidence: "medium"
   })).filter(candidate => !candidate.value.includes("@") && isValidWebsite(candidate.value));
 
-  const fallback = extractWebsite(text);
+  const fallback = extractWebsiteFromText(text);
   if (fallback) {
     candidates.push(makeCandidate(fallback, 10, "medium"));
   }
@@ -380,8 +359,8 @@ function buildPhoneCandidates(lines: NormalizedLine[]) {
     if (matches.length === 0) return;
 
     matches.forEach((match, matchIndex) => {
-      const normalized = normalizePhone(match);
-      if (!isValidPhone(normalized)) return;
+      const normalized = normalizeAcceptedPhoneValue(match);
+      if (!normalized) return;
 
       const baseScore = 8 + (line.labels.includes("office") || line.labels.includes("mobile") ? 6 : 0);
       const candidate = makeCandidate(normalized, baseScore, baseScore >= 14 ? "high" : "medium", [line.index]);
@@ -410,27 +389,28 @@ function buildAddressCandidates(lines: NormalizedLine[], consumedValues: string[
 
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index];
-    if (consumed.has(line.cleaned) || !looksLikeAddress(line.cleaned)) continue;
+    if (consumed.has(line.cleaned) || !looksLikeAddressValue(line.cleaned)) continue;
 
     const parts = [line.cleaned];
     const indices = [line.index];
     const next = lines[index + 1];
     const nextTwo = lines[index + 2];
 
-    if (next && !consumed.has(next.cleaned) && looksLikeAddressContinuation(next.cleaned)) {
+    if (next && !consumed.has(next.cleaned) && looksLikeAddressContinuationValue(next.cleaned)) {
       parts.push(next.cleaned);
       indices.push(next.index);
-    } else if (next && !consumed.has(next.cleaned) && next.band === line.band && next.wordCount <= 5 && looksGeoSpecific(next.cleaned)) {
+    } else if (next && !consumed.has(next.cleaned) && next.band === line.band && next.wordCount <= 5 && looksGeoSpecificValue(next.cleaned)) {
       parts.push(next.cleaned);
       indices.push(next.index);
     }
 
-    if (nextTwo && !consumed.has(nextTwo.cleaned) && parts.length === 2 && looksGeoSpecific(nextTwo.cleaned)) {
+    if (nextTwo && !consumed.has(nextTwo.cleaned) && parts.length === 2 && looksGeoSpecificValue(nextTwo.cleaned)) {
       parts.push(nextTwo.cleaned);
       indices.push(nextTwo.index);
     }
 
-    const value = parts.join(", ");
+    const value = normalizeAddressValue(parts.join(", "));
+    if (!value) continue;
     let score = 10;
     if (parts.length > 1) score += 6;
     if (/\b(canada|usa|ontario|alberta|quebec)\b/i.test(value)) score += 3;
@@ -445,7 +425,7 @@ function buildAddressCandidates(lines: NormalizedLine[], consumedValues: string[
 function buildCompanyCandidates(lines: NormalizedLine[], sourceType: SourceType) {
   return dedupeCandidates(
     lines
-      .filter(line => !line.hasEmail && !line.hasWebsite && !looksLikeAddress(line.cleaned) && !isLikelyPhoneLabel(line.lower))
+      .filter(line => !line.hasEmail && !line.hasWebsite && !looksLikeAddressValue(line.cleaned) && !isLikelyPhoneLabel(line.lower))
       .map(line => {
         let score = 0;
         if (line.labels.includes("company")) score += 14;
@@ -470,7 +450,7 @@ function buildTitleCandidates(lines: NormalizedLine[], sourceType: SourceType, c
 
   return dedupeCandidates(
     lines
-      .filter(line => line.cleaned !== primaryCompany && !line.hasEmail && !line.hasWebsite && !line.hasDigits && !looksLikeAddress(line.cleaned))
+      .filter(line => line.cleaned !== primaryCompany && !line.hasEmail && !line.hasWebsite && !line.hasDigits && !looksLikeAddressValue(line.cleaned))
       .map(line => {
         let score = 0;
         if (line.labels.includes("title")) score += 14;
@@ -493,7 +473,7 @@ function buildNameCandidates(lines: NormalizedLine[], sourceType: SourceType, co
 
   return dedupeCandidates(
     lines
-      .filter(line => line.cleaned !== primaryCompany && !line.hasEmail && !line.hasWebsite && !line.hasDigits && !looksLikeAddress(line.cleaned))
+      .filter(line => line.cleaned !== primaryCompany && !line.hasEmail && !line.hasWebsite && !line.hasDigits && !looksLikeAddressValue(line.cleaned))
       .map(line => {
         let score = 0;
         if (line.labels.includes("name")) score += 14;
@@ -522,20 +502,11 @@ function chooseDistinctCandidate(candidates: Candidate[], disallowedValues: stri
 }
 
 function buildNotes(lines: NormalizedLine[], consumedValues: string[]) {
-  const consumed = new Set(consumedValues.filter(Boolean).map(normalizeComparable));
-  const seen = new Set<string>();
-
-  return lines
+  return dedupeTextValues(lines
     .map(line => line.cleaned)
-    .filter(value => !consumed.has(normalizeComparable(value)))
+    .filter(value => !new Set(consumedValues.filter(Boolean).map(normalizeComparable)).has(normalizeComparable(value)))
     .filter(value => !looksLikeDecorativeNoise(value))
-    .filter(value => {
-      const key = normalizeComparable(value);
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    })
-    .join(" | ");
+  ).join(" | ");
 }
 
 function collectRegexCandidates(
@@ -581,14 +552,6 @@ function dedupeCandidates(candidates: Candidate[]) {
   return Array.from(seen.values()).sort((left, right) => right.score - left.score);
 }
 
-function normalizeComparable(value: string) {
-  return value.toLowerCase().replace(/\s+/g, " ").trim();
-}
-
-function normalizePhone(value: string) {
-  return value.replace(/\s+/g, " ").trim();
-}
-
 function looksLikePersonName(value: string) {
   if (!/^[A-Za-z][A-Za-z\s.'-]{3,}$/.test(value)) return false;
   const words = value.split(/\s+/).filter(Boolean);
@@ -613,41 +576,6 @@ function isLikelyPhoneLabel(lower: string) {
   return /\b(cell|mobile|main|office|tel|phone|ext)\b/.test(lower);
 }
 
-function isValidEmail(value: string) {
-  return /^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$/i.test(value);
-}
-
-function isValidWebsite(value: string) {
-  return /^(?:https?:\/\/)?(?:www\.)?[a-z0-9-]+\.[a-z]{2,}(?:\/[^\s]*)?$/i.test(value);
-}
-
-function isValidPhone(value: string) {
-  const digits = value.replace(/\D/g, "");
-  return digits.length >= 10 && digits.length <= 12;
-}
-
-function extractWebsite(value: string) {
-  const matches = value.match(/(?:https?:\/\/)?(?:www\.)?[a-z0-9-]+\.[a-z]{2,}(?:\/[^\s]*)?/gi) ?? [];
-  return matches.find(candidate => !candidate.includes("@")) ?? "";
-}
-
-function looksLikeAddress(value: string) {
-  const lower = value.toLowerCase();
-  return /\d/.test(value) && (
-    ADDRESS_WORDS.some(word => new RegExp(`\\b${escapeRegExp(word)}\\b`, "i").test(value)) ||
-    /[A-Z]\d[A-Z]\s?\d[A-Z]\d/i.test(value) ||
-    /\b[a-z]+,\s*[a-z]+\b/i.test(lower)
-  );
-}
-
-function looksGeoSpecific(value: string) {
-  return /\b(canada|usa|ontario|alberta|quebec|toronto|vancouver|richmond hill)\b/i.test(value) || /[A-Z]\d[A-Z]\s?\d[A-Z]\d/i.test(value);
-}
-
-function looksLikeAddressContinuation(value: string) {
-  return looksLikeAddress(value) || looksGeoSpecific(value);
-}
-
 function looksLikeDecorativeNoise(value: string) {
   return /^[|.+\-_/\\\s]+$/.test(value);
 }
@@ -664,8 +592,4 @@ function isSpecialtyHeading(value: string) {
 
 function clamp(value: number) {
   return Math.max(0, Math.min(1, value));
-}
-
-function escapeRegExp(value: string) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
