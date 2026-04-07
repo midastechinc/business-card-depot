@@ -3,9 +3,10 @@
     "name": "Business Card Depot",
     "slug": "business-card-depot",
     "scheme": "businesscarddepot",
-    "version": "0.1.0",
+    "version": "0.1.1",
     "orientation": "portrait",
     "userInterfaceStyle": "light",
+    "icon": "./assets/icon.png",
     "splash": {
       "resizeMode": "contain",
       "backgroundColor": "#f3efe6"
@@ -22,7 +23,15 @@
         "android.permission.WRITE_CONTACTS"
       ],
       "package": "com.midastech.businesscarddepot",
-      "versionCode": 1
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "monochromeImage": "./assets/adaptive-icon-monochrome.png",
+        "backgroundColor": "#f3efe6"
+      },
+      "versionCode": 2
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
     },
     "plugins": [
       "expo-image-picker",
