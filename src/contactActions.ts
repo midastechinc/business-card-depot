@@ -1,3 +1,4 @@
+import * as Contacts from "expo-contacts";
 import type { ContactDraft } from "./contactParser";
 
 export type SavedContactEntry = {
@@ -90,6 +91,31 @@ export function createVCard(draft: ContactDraft) {
   return `${lines.join("\n")}\n`;
 }
 
+export async function saveDraftToNativeContacts(draft: ContactDraft) {
+  if (typeof Contacts.presentFormAsync !== "function") {
+    throw new Error("Native contacts are not available on this device.");
+  }
+
+  const permission = await Contacts.requestPermissionsAsync();
+  if (!permission.granted) {
+    throw new Error("Contacts permission was denied.");
+  }
+
+  const contact = buildNativeContact(draft);
+
+  try {
+    await Contacts.presentFormAsync(undefined, contact, {
+      isNew: true,
+      allowsEditing: true,
+      allowsActions: true
+    });
+    return "presented";
+  } catch {
+    await Contacts.addContactAsync(contact);
+    return "saved";
+  }
+}
+
 export function getPrimaryLabel(draft: ContactDraft) {
   return draft.fullName || draft.company || "Untitled contact";
 }
@@ -110,4 +136,26 @@ function escapeVCardValue(value: string) {
     .replace(/\n/g, "\\n")
     .replace(/;/g, "\\;")
     .replace(/,/g, "\\,");
+}
+
+function buildNativeContact(draft: ContactDraft): Contacts.Contact {
+  const [firstName, ...remaining] = draft.fullName.trim().split(/\s+/).filter(Boolean);
+  const lastName = remaining.join(" ");
+
+  return {
+    contactType: draft.company && !draft.fullName ? Contacts.ContactTypes.Company : Contacts.ContactTypes.Person,
+    name: draft.fullName || draft.company || "Business Card Contact",
+    firstName: firstName || undefined,
+    lastName: lastName || undefined,
+    company: draft.company || undefined,
+    jobTitle: draft.title || undefined,
+    emails: draft.email ? [{ label: "work", email: draft.email, isPrimary: true }] : undefined,
+    phoneNumbers: [
+      draft.mobilePhone ? { label: "mobile", number: draft.mobilePhone, isPrimary: true } : undefined,
+      draft.officePhone ? { label: "work", number: draft.officePhone } : undefined
+    ].filter(Boolean) as Contacts.PhoneNumber[],
+    urlAddresses: draft.website ? [{ label: "work", url: draft.website }] : undefined,
+    addresses: draft.address ? [{ label: "work", street: draft.address }] : undefined,
+    note: draft.notes || undefined
+  };
 }

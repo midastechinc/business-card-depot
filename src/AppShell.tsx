@@ -22,6 +22,7 @@ import {
   createVCard,
   formatDateLabel,
   getPrimaryLabel,
+  saveDraftToNativeContacts,
   type SavedContactEntry
 } from "./contactActions";
 import {
@@ -358,6 +359,22 @@ export function AppShell() {
   async function exportSavedContact(entry: SavedContactEntry) {
     const vCard = createVCard(entry.draft);
     const fallbackLabel = getPrimaryLabel(entry.draft);
+
+    if (Platform.OS !== "web") {
+      try {
+        const result = await saveDraftToNativeContacts(entry.draft);
+        Alert.alert(
+          result === "presented" ? "Ready to save" : "Saved to contacts",
+          result === "presented"
+            ? `${fallbackLabel} is loaded into your phone's contact form. Tap Save there to finish.`
+            : `${fallbackLabel} was added to your phone contacts.`
+        );
+        return;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Could not open the native contacts form.";
+        Alert.alert("Save to contacts unavailable", `${message} A share sheet will open instead.`);
+      }
+    }
 
     if (Platform.OS === "web" && typeof window !== "undefined" && typeof document !== "undefined") {
       const blob = new Blob([vCard], { type: "text/vcard;charset=utf-8" });
