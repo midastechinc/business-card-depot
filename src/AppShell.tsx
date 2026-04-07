@@ -53,16 +53,15 @@ type IntakeMode = "Scan from camera" | "Import image" | "Import screenshot";
 type AssignmentMode = "replace" | "append";
 type CompactPanel = "capture" | "review" | "fix" | "saved";
 
-const intakeOptions: Array<{ title: IntakeMode; subtitle: string; badge: string }> = [
-  { title: "Scan from camera", subtitle: "Capture a physical card with the phone camera.", badge: "Camera" },
-  { title: "Import image", subtitle: "Use a saved photo or gallery image.", badge: "Image" },
-  { title: "Import screenshot", subtitle: "Pull details from a screenshot or website profile.", badge: "Web" }
+const intakeOptions: Array<{ title: IntakeMode; subtitle: string; badge: string; shortLabel: string }> = [
+  { title: "Scan from camera", subtitle: "Capture a physical card with the phone camera.", badge: "Camera", shortLabel: "CAM" },
+  { title: "Import image", subtitle: "Use a saved photo or gallery image.", badge: "Image", shortLabel: "IMG" },
+  { title: "Import screenshot", subtitle: "Pull details from a screenshot or website profile.", badge: "Web", shortLabel: "SHOT" }
 ];
 
 const compactPanels: Array<{ key: CompactPanel; label: string }> = [
   { key: "capture", label: "Capture" },
   { key: "review", label: "Review" },
-  { key: "fix", label: "Fix" },
   { key: "saved", label: "Saved" }
 ];
 
@@ -595,7 +594,7 @@ export function AppShell() {
               </View>
             ) : null}
 
-            <View style={styles.optionStack}>
+            <View style={styles.captureButtonRow}>
               {intakeOptions.map(option => {
                 const isActive = option.title === selectedIntake;
                 return (
@@ -605,13 +604,13 @@ export function AppShell() {
                       void handleIntakeSelection(option.title);
                     }}
                     disabled={isRunningOcr}
-                    style={[styles.optionCard, isActive && styles.optionCardActive]}
+                    style={[styles.captureIconButton, isActive && styles.captureIconButtonActive]}
                   >
-                    <View style={styles.optionHeader}>
-                      <Text style={[styles.optionTitle, isActive && styles.optionTitleActive]}>{option.title}</Text>
-                      <Badge label={option.badge} active={isActive} />
+                    <View style={[styles.captureIconBadge, isActive && styles.captureIconBadgeActive]}>
+                      <Text style={[styles.captureIconBadgeText, isActive && styles.captureIconBadgeTextActive]}>{option.shortLabel}</Text>
                     </View>
-                    <Text style={styles.optionBody}>{option.subtitle}</Text>
+                    <Text style={[styles.captureIconTitle, isActive && styles.captureIconTitleActive]}>{option.title}</Text>
+                    <Text style={styles.captureIconBody}>{option.subtitle}</Text>
                   </Pressable>
                 );
               })}
@@ -620,7 +619,7 @@ export function AppShell() {
             <View style={styles.previewCard}>
               {selectedImageUri ? (
                 <>
-                  <Image source={{ uri: selectedImageUri }} style={styles.previewImage} resizeMode="cover" />
+                  <Image source={{ uri: selectedImageUri }} style={styles.previewImage} resizeMode="contain" />
                   <Text style={styles.previewCaption}>{selectedIntake}</Text>
                 </>
               ) : (
@@ -635,7 +634,7 @@ export function AppShell() {
 
         {shouldShowPanel("review") ? (
           <View style={styles.cardPanel}>
-            <PanelHeader title="2. Review" meta={processingStage === "review" ? "Ready" : processingStage === "selected" ? "Processing" : "Waiting"} />
+            <PanelHeader title="2. Review & Fix" meta={processingStage === "review" ? "Ready" : processingStage === "selected" ? "Processing" : "Waiting"} />
             {isRunningOcr ? (
               <View style={styles.loadingCard}>
                 <ActivityIndicator size="small" color={theme.colors.brand} />
@@ -655,37 +654,157 @@ export function AppShell() {
               </View>
             ) : null}
 
-            <View style={styles.formGrid}>
-              {fieldOrder.map(field => (
-                <View key={field.key} style={styles.fieldBlock}>
-                  <View style={styles.fieldHeader}>
-                    <Text style={styles.fieldLabel}>{field.label}</Text>
-                    <ConfidenceChip confidence={fieldConfidence[field.key]} />
-                  </View>
-                  <TextInput
-                    value={draft[field.key]}
-                    keyboardType={field.keyboard ?? "default"}
-                    onChangeText={value => setFieldValue(field.key, value, value ? "medium" : "low")}
-                    style={styles.input}
-                    placeholder={field.label}
-                    placeholderTextColor={theme.colors.placeholder}
-                  />
+            <View style={[styles.compareShell, isCompactScreen && styles.compareShellCompact]}>
+              <View style={[styles.compareSourceCard, isCompactScreen && styles.compareSourceCardCompact]}>
+                <Text style={styles.compareSectionLabel}>Source</Text>
+                <View style={styles.comparePreviewCard}>
+                  {selectedImageUri ? (
+                    <Image source={{ uri: selectedImageUri }} style={styles.comparePreviewImage} resizeMode="contain" />
+                  ) : (
+                    <View style={styles.comparePreviewPlaceholder}>
+                      <Text style={styles.previewEmptyTitle}>No image yet</Text>
+                      <Text style={styles.previewEmptyBody}>Capture or import a card to compare source data here.</Text>
+                    </View>
+                  )}
                 </View>
-              ))}
 
-              <View style={styles.fieldBlock}>
-                <View style={styles.fieldHeader}>
-                  <Text style={styles.fieldLabel}>Notes</Text>
-                  <ConfidenceChip confidence={fieldConfidence.notes} />
+                {topSuggestions.length > 0 ? (
+                  <View style={styles.suggestionCard}>
+                    <Text style={styles.suggestionTitle}>Best guesses for {assignableFields.find(field => field.key === activeAssignmentField)?.label}</Text>
+                    <View style={styles.suggestionRow}>
+                      {topSuggestions.map(suggestion => (
+                        <Pressable key={suggestion} style={styles.suggestionChip} onPress={() => applySuggestion(suggestion)}>
+                          <Text style={styles.suggestionChipText}>{suggestion}</Text>
+                        </Pressable>
+                      ))}
+                    </View>
+                  </View>
+                ) : null}
+
+                <Text style={styles.assignHelp}>Pick a field, then tap an OCR line to replace or append it.</Text>
+
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.horizontalChipRow} keyboardShouldPersistTaps="handled">
+                  {assignableFields.map(field => {
+                    const isActive = field.key === activeAssignmentField;
+                    return (
+                      <Pressable
+                        key={field.key}
+                        onPress={() => setActiveAssignmentField(field.key)}
+                        style={[styles.assignmentFieldChip, isActive && styles.assignmentFieldChipActive]}
+                      >
+                        <Text style={[styles.assignmentFieldText, isActive && styles.assignmentFieldTextActive]}>{field.label}</Text>
+                      </Pressable>
+                    );
+                  })}
+                </ScrollView>
+
+                <View style={styles.assignmentTargetBox}>
+                  <Text style={styles.assignmentTargetLabel}>Current target</Text>
+                  <Text style={styles.assignmentTargetValue}>{assignableFields.find(field => field.key === activeAssignmentField)?.label}</Text>
+                  <Text style={styles.assignmentTargetHint}>
+                    {assignmentMode === "append" ? "Tap a line to append it." : "Tap a line to replace this field."}
+                  </Text>
                 </View>
-                <TextInput
-                  value={draft.notes}
-                  multiline
-                  onChangeText={value => setFieldValue("notes", value, value ? "medium" : "low")}
-                  style={[styles.input, styles.notesInput]}
-                  placeholder="Context or follow-up notes"
-                  placeholderTextColor={theme.colors.placeholder}
-                />
+
+                {assignmentNotice ? (
+                  <View style={styles.assignmentNoticeBox}>
+                    <Text style={styles.assignmentNoticeText}>{assignmentNotice}</Text>
+                  </View>
+                ) : null}
+
+                <View style={styles.assignmentModeRow}>
+                  <Pressable
+                    style={[styles.assignmentModeChip, assignmentMode === "replace" && styles.assignmentModeChipActive]}
+                    onPress={() => setAssignmentMode("replace")}
+                  >
+                    <Text style={[styles.assignmentModeText, assignmentMode === "replace" && styles.assignmentModeTextActive]}>Replace</Text>
+                  </Pressable>
+                  <Pressable
+                    style={[styles.assignmentModeChip, assignmentMode === "append" && styles.assignmentModeChipActive]}
+                    onPress={() => setAssignmentMode("append")}
+                  >
+                    <Text style={[styles.assignmentModeText, assignmentMode === "append" && styles.assignmentModeTextActive]}>Append</Text>
+                  </Pressable>
+                  <Pressable style={styles.assignmentClearChip} onPress={clearActiveAssignmentField}>
+                    <Text style={styles.assignmentClearText}>Clear</Text>
+                  </Pressable>
+                </View>
+
+                <View style={styles.lineStack}>
+                  {visibleOcrLines.map((line, index) => (
+                    <Pressable key={`${line}-${index}`} onPress={() => assignOcrLineToField(line)} style={styles.lineCard}>
+                      <View style={styles.lineHeader}>
+                        <Text style={styles.lineIndex}>Line {index + 1}</Text>
+                        <Text style={styles.lineActionText}>{assignmentMode === "append" ? "Tap to append" : "Tap to replace"}</Text>
+                      </View>
+                      <Text style={styles.lineText}>{line}</Text>
+                    </Pressable>
+                  ))}
+                </View>
+
+                {isCompactScreen && ocrLines.length > 4 ? (
+                  <Pressable style={styles.togglePanelButton} onPress={() => setShowAllOcrLines(current => !current)}>
+                    <Text style={styles.togglePanelButtonText}>
+                      {showAllOcrLines ? "Show fewer OCR lines" : `Show all ${ocrLines.length} OCR lines`}
+                    </Text>
+                  </Pressable>
+                ) : null}
+
+                {(ocrError || rawOcrText) ? (
+                  <>
+                    {ocrError ? (
+                      <View style={styles.errorBox}>
+                        <Text style={styles.errorTitle}>OCR issue</Text>
+                        <Text style={styles.errorBody}>{ocrError}</Text>
+                      </View>
+                    ) : null}
+                    <Pressable style={styles.togglePanelButton} onPress={() => setShowRawOcr(current => !current)}>
+                      <Text style={styles.togglePanelButtonText}>{showRawOcr ? "Hide raw OCR text" : "Show raw OCR text"}</Text>
+                    </Pressable>
+                    {showRawOcr ? (
+                      <View style={styles.rawTextBox}>
+                        <Text style={styles.rawText}>{rawOcrText}</Text>
+                      </View>
+                    ) : null}
+                  </>
+                ) : null}
+              </View>
+
+              <View style={styles.compareEditCard}>
+                <Text style={styles.compareSectionLabel}>Editable fields</Text>
+                <View style={styles.formGrid}>
+                  {fieldOrder.map(field => (
+                    <View key={field.key} style={styles.fieldBlock}>
+                      <View style={styles.fieldHeader}>
+                        <Text style={styles.fieldLabel}>{field.label}</Text>
+                        <ConfidenceChip confidence={fieldConfidence[field.key]} />
+                      </View>
+                      <TextInput
+                        value={draft[field.key]}
+                        keyboardType={field.keyboard ?? "default"}
+                        onChangeText={value => setFieldValue(field.key, value, value ? "medium" : "low")}
+                        style={styles.input}
+                        placeholder={field.label}
+                        placeholderTextColor={theme.colors.placeholder}
+                      />
+                    </View>
+                  ))}
+
+                  <View style={styles.fieldBlock}>
+                    <View style={styles.fieldHeader}>
+                      <Text style={styles.fieldLabel}>Notes</Text>
+                      <ConfidenceChip confidence={fieldConfidence.notes} />
+                    </View>
+                    <TextInput
+                      value={draft.notes}
+                      multiline
+                      onChangeText={value => setFieldValue("notes", value, value ? "medium" : "low")}
+                      style={[styles.input, styles.notesInput]}
+                      placeholder="Context or follow-up notes"
+                      placeholderTextColor={theme.colors.placeholder}
+                    />
+                  </View>
+                </View>
               </View>
             </View>
 
@@ -729,113 +848,6 @@ export function AppShell() {
                 <Text style={styles.secondaryButtonText}>New scan</Text>
               </Pressable>
             </View>
-          </View>
-        ) : null}
-
-        {shouldShowPanel("fix") ? (
-          <View style={styles.cardPanel}>
-            <PanelHeader title="3. Fix" meta={`${ocrLines.length} OCR lines`} />
-
-            {topSuggestions.length > 0 ? (
-              <View style={styles.suggestionCard}>
-                <Text style={styles.suggestionTitle}>Best guesses for {assignableFields.find(field => field.key === activeAssignmentField)?.label}</Text>
-                <View style={styles.suggestionRow}>
-                  {topSuggestions.map(suggestion => (
-                    <Pressable key={suggestion} style={styles.suggestionChip} onPress={() => applySuggestion(suggestion)}>
-                      <Text style={styles.suggestionChipText}>{suggestion}</Text>
-                    </Pressable>
-                  ))}
-                </View>
-              </View>
-            ) : null}
-
-            <Text style={styles.assignHelp}>Pick a field, then tap a line to replace or append it.</Text>
-
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.horizontalChipRow} keyboardShouldPersistTaps="handled">
-              {assignableFields.map(field => {
-                const isActive = field.key === activeAssignmentField;
-                return (
-                  <Pressable
-                    key={field.key}
-                    onPress={() => setActiveAssignmentField(field.key)}
-                    style={[styles.assignmentFieldChip, isActive && styles.assignmentFieldChipActive]}
-                  >
-                    <Text style={[styles.assignmentFieldText, isActive && styles.assignmentFieldTextActive]}>{field.label}</Text>
-                  </Pressable>
-                );
-              })}
-            </ScrollView>
-
-            <View style={styles.assignmentTargetBox}>
-              <Text style={styles.assignmentTargetLabel}>Current target</Text>
-              <Text style={styles.assignmentTargetValue}>{assignableFields.find(field => field.key === activeAssignmentField)?.label}</Text>
-              <Text style={styles.assignmentTargetHint}>
-                {assignmentMode === "append" ? "Tap a line to append it." : "Tap a line to replace this field."}
-              </Text>
-            </View>
-
-            {assignmentNotice ? (
-              <View style={styles.assignmentNoticeBox}>
-                <Text style={styles.assignmentNoticeText}>{assignmentNotice}</Text>
-              </View>
-            ) : null}
-
-            <View style={styles.assignmentModeRow}>
-              <Pressable
-                style={[styles.assignmentModeChip, assignmentMode === "replace" && styles.assignmentModeChipActive]}
-                onPress={() => setAssignmentMode("replace")}
-              >
-                <Text style={[styles.assignmentModeText, assignmentMode === "replace" && styles.assignmentModeTextActive]}>Replace</Text>
-              </Pressable>
-              <Pressable
-                style={[styles.assignmentModeChip, assignmentMode === "append" && styles.assignmentModeChipActive]}
-                onPress={() => setAssignmentMode("append")}
-              >
-                <Text style={[styles.assignmentModeText, assignmentMode === "append" && styles.assignmentModeTextActive]}>Append</Text>
-              </Pressable>
-              <Pressable style={styles.assignmentClearChip} onPress={clearActiveAssignmentField}>
-                <Text style={styles.assignmentClearText}>Clear</Text>
-              </Pressable>
-            </View>
-
-            <View style={styles.lineStack}>
-              {visibleOcrLines.map((line, index) => (
-                <Pressable key={`${line}-${index}`} onPress={() => assignOcrLineToField(line)} style={styles.lineCard}>
-                  <View style={styles.lineHeader}>
-                    <Text style={styles.lineIndex}>Line {index + 1}</Text>
-                    <Text style={styles.lineActionText}>{assignmentMode === "append" ? "Tap to append" : "Tap to replace"}</Text>
-                  </View>
-                  <Text style={styles.lineText}>{line}</Text>
-                </Pressable>
-              ))}
-            </View>
-
-            {isCompactScreen && ocrLines.length > 4 ? (
-              <Pressable style={styles.togglePanelButton} onPress={() => setShowAllOcrLines(current => !current)}>
-                <Text style={styles.togglePanelButtonText}>
-                  {showAllOcrLines ? "Show fewer OCR lines" : `Show all ${ocrLines.length} OCR lines`}
-                </Text>
-              </Pressable>
-            ) : null}
-
-            {(ocrError || rawOcrText) ? (
-              <>
-                {ocrError ? (
-                  <View style={styles.errorBox}>
-                    <Text style={styles.errorTitle}>OCR issue</Text>
-                    <Text style={styles.errorBody}>{ocrError}</Text>
-                  </View>
-                ) : null}
-                <Pressable style={styles.togglePanelButton} onPress={() => setShowRawOcr(current => !current)}>
-                  <Text style={styles.togglePanelButtonText}>{showRawOcr ? "Hide raw OCR text" : "Show raw OCR text"}</Text>
-                </Pressable>
-                {showRawOcr ? (
-                  <View style={styles.rawTextBox}>
-                    <Text style={styles.rawText}>{rawOcrText}</Text>
-                  </View>
-                ) : null}
-              </>
-            ) : null}
           </View>
         ) : null}
 
@@ -1290,39 +1302,60 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: "700"
   },
-  optionStack: {
+  captureButtonRow: {
+    flexDirection: "row",
     gap: 10
   },
-  optionCard: {
+  captureIconButton: {
+    flex: 1,
+    minHeight: 116,
     borderRadius: 20,
     borderWidth: 1,
     borderColor: theme.colors.border,
-    paddingHorizontal: 14,
-    paddingVertical: 14,
-    gap: 6
+    paddingHorizontal: 10,
+    paddingVertical: 12,
+    alignItems: "center",
+    justifyContent: "flex-start",
+    gap: 8,
+    backgroundColor: "#fcfaf6"
   },
-  optionCardActive: {
+  captureIconButtonActive: {
     borderColor: theme.colors.brand,
     backgroundColor: "#eef5fb"
   },
-  optionHeader: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: 8
+  captureIconBadge: {
+    minWidth: 52,
+    borderRadius: 999,
+    backgroundColor: "#eee4d5",
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    alignItems: "center"
   },
-  optionTitle: {
+  captureIconBadgeActive: {
+    backgroundColor: theme.colors.brand
+  },
+  captureIconBadgeText: {
+    color: theme.colors.muted,
+    fontSize: 11,
+    fontWeight: "800",
+    letterSpacing: 0.6
+  },
+  captureIconBadgeTextActive: {
+    color: theme.colors.surface
+  },
+  captureIconTitle: {
     color: theme.colors.text,
-    fontSize: 18,
+    fontSize: 14,
     fontWeight: "800"
   },
-  optionTitleActive: {
+  captureIconTitleActive: {
     color: theme.colors.brand
   },
-  optionBody: {
+  captureIconBody: {
     color: theme.colors.muted,
-    fontSize: 14,
-    lineHeight: 20
+    fontSize: 12,
+    lineHeight: 16,
+    textAlign: "center"
   },
   badge: {
     borderRadius: 999,
@@ -1351,7 +1384,7 @@ const styles = StyleSheet.create({
   },
   previewImage: {
     width: "100%",
-    height: 160,
+    height: 220,
     borderRadius: 16,
     backgroundColor: "#ddd4c8"
   },
@@ -1390,6 +1423,50 @@ const styles = StyleSheet.create({
   },
   formGrid: {
     gap: 10
+  },
+  compareShell: {
+    flexDirection: "row",
+    gap: 12,
+    alignItems: "flex-start"
+  },
+  compareShellCompact: {
+    flexDirection: "column"
+  },
+  compareSourceCard: {
+    width: 250,
+    gap: 10
+  },
+  compareSourceCardCompact: {
+    width: "100%"
+  },
+  compareEditCard: {
+    flex: 1,
+    gap: 10
+  },
+  compareSectionLabel: {
+    color: theme.colors.muted,
+    fontSize: 11,
+    fontWeight: "700",
+    letterSpacing: 1.2,
+    textTransform: "uppercase"
+  },
+  comparePreviewCard: {
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    backgroundColor: "#fcfaf6",
+    padding: 10,
+    minHeight: 210,
+    justifyContent: "center"
+  },
+  comparePreviewImage: {
+    width: "100%",
+    height: 220,
+    borderRadius: 16,
+    backgroundColor: "#ddd4c8"
+  },
+  comparePreviewPlaceholder: {
+    gap: 8
   },
   fieldBlock: {
     gap: 6
