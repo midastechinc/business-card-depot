@@ -101,6 +101,32 @@ const TITLE_WORDS = [
   "vice president"
 ];
 
+const SPECIALTY_WORDS = [
+  "oncology",
+  "surgery",
+  "surgical",
+  "cardiology",
+  "dermatology",
+  "orthopedic",
+  "orthopaedic",
+  "medicine",
+  "medical",
+  "clinic",
+  "specialty"
+];
+
+const CREDENTIAL_WORDS = [
+  "md",
+  "msc",
+  "frcsc",
+  "phd",
+  "mba",
+  "bsc",
+  "dds",
+  "rn",
+  "np"
+];
+
 const COMPANY_WORDS = [
   "agency",
   "auto",
@@ -180,9 +206,9 @@ export function parseContactFromOcr(payload: OcrPayload, sourceType: SourceType 
   const titleCandidates = buildTitleCandidates(lines, sourceType, companyCandidates);
   const nameCandidates = buildNameCandidates(lines, sourceType, companyCandidates, titleCandidates);
 
-  const fullName = chooseDistinctCandidate(nameCandidates);
-  const company = chooseDistinctCandidate(companyCandidates, [fullName.value]);
-  const title = chooseDistinctCandidate(titleCandidates, [fullName.value, company.value]);
+  const fullName = chooseDistinctCandidate(nameCandidates, [], sourceType === "screenshot" ? 12 : 0);
+  const company = chooseDistinctCandidate(companyCandidates, [fullName.value], sourceType === "screenshot" ? 12 : 0);
+  const title = chooseDistinctCandidate(titleCandidates, [fullName.value, company.value], sourceType === "screenshot" ? 10 : 0);
   const email = chooseDistinctCandidate(emailCandidates);
   const website = chooseDistinctCandidate(websiteCandidates, [email.value]);
   const officePhone = chooseDistinctCandidate(phoneCandidates.office);
@@ -192,7 +218,7 @@ export function parseContactFromOcr(payload: OcrPayload, sourceType: SourceType 
     website.value,
     officePhone.value,
     mobilePhone.value
-  ]);
+  ], sourceType === "screenshot" ? 10 : 0);
 
   const draft: ContactDraft = {
     fullName: fullName.value,
@@ -429,7 +455,9 @@ function buildCompanyCandidates(lines: NormalizedLine[], sourceType: SourceType)
         if (line.isUpperCaseish) score += 4;
         if (line.cleaned.includes("|")) score += 3;
         if (sourceType === "screenshot" && line.band !== "bottom") score += 2;
+        if (sourceType === "screenshot" && isSpecialtyHeading(line.cleaned)) score += 6;
         if (looksLikePersonName(line.cleaned)) score -= 5;
+        if (looksLikeCredentialLine(line.cleaned)) score -= 12;
         if (isLikelyTitle(line.cleaned)) score -= 4;
         return makeCandidate(line.cleaned, score, score >= 15 ? "high" : score >= 9 ? "medium" : "low", [line.index]);
       })
@@ -447,10 +475,12 @@ function buildTitleCandidates(lines: NormalizedLine[], sourceType: SourceType, c
         let score = 0;
         if (line.labels.includes("title")) score += 14;
         if (isLikelyTitle(line.cleaned)) score += 10;
+        if (sourceType === "screenshot" && isSpecialtyHeading(line.cleaned)) score += 7;
         if (line.band === "bottom") score += 4;
         if (sourceType === "screenshot" && line.band !== "top") score += 1;
         if (line.wordCount >= 2 && line.wordCount <= 6) score += 2;
         if (isLikelyCompany(line.cleaned)) score -= 5;
+        if (looksLikeCredentialLine(line.cleaned)) score -= 12;
         return makeCandidate(line.cleaned, score, score >= 15 ? "high" : score >= 9 ? "medium" : "low", [line.index]);
       })
       .filter(candidate => candidate.score > 4)
@@ -468,6 +498,7 @@ function buildNameCandidates(lines: NormalizedLine[], sourceType: SourceType, co
         let score = 0;
         if (line.labels.includes("name")) score += 14;
         if (looksLikePersonName(line.cleaned)) score += 12;
+        if (/^\s*dr\.?\s+/i.test(line.cleaned)) score += 10;
         if (line.wordCount >= 2 && line.wordCount <= 4) score += 3;
         if (line.band === "bottom") score += 5;
         if (line.band === "middle") score += 2;
@@ -476,25 +507,34 @@ function buildNameCandidates(lines: NormalizedLine[], sourceType: SourceType, co
         if (line.isUpperCaseish) score -= 3;
         if (isLikelyCompany(line.cleaned)) score -= 6;
         if (isLikelyTitle(line.cleaned)) score -= 4;
+        if (looksLikeCredentialLine(line.cleaned)) score -= 12;
+        if (isSpecialtyHeading(line.cleaned)) score -= 8;
         return makeCandidate(line.cleaned, score, score >= 16 ? "high" : score >= 10 ? "medium" : "low", [line.index]);
       })
       .filter(candidate => candidate.score > 5)
   );
 }
 
-function chooseDistinctCandidate(candidates: Candidate[], disallowedValues: string[] = []) {
+function chooseDistinctCandidate(candidates: Candidate[], disallowedValues: string[] = [], minimumScore = 0) {
   const disallowed = new Set(disallowedValues.filter(Boolean).map(normalizeComparable));
-  const selected = candidates.find(candidate => !disallowed.has(normalizeComparable(candidate.value)));
+  const selected = candidates.find(candidate => candidate.score >= minimumScore && !disallowed.has(normalizeComparable(candidate.value)));
   return selected ?? makeCandidate("", 0, "low");
 }
 
 function buildNotes(lines: NormalizedLine[], consumedValues: string[]) {
   const consumed = new Set(consumedValues.filter(Boolean).map(normalizeComparable));
+  const seen = new Set<string>();
 
   return lines
     .map(line => line.cleaned)
     .filter(value => !consumed.has(normalizeComparable(value)))
     .filter(value => !looksLikeDecorativeNoise(value))
+    .filter(value => {
+      const key = normalizeComparable(value);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
     .join(" | ");
 }
 
@@ -553,13 +593,15 @@ function looksLikePersonName(value: string) {
   if (!/^[A-Za-z][A-Za-z\s.'-]{3,}$/.test(value)) return false;
   const words = value.split(/\s+/).filter(Boolean);
   if (words.length < 2 || words.length > 4) return false;
-  if (words.some(word => TITLE_WORDS.includes(word.toLowerCase()))) return false;
-  return words.filter(word => /^[A-Z][A-Za-z.'-]+$/.test(word)).length >= 2;
+  const filtered = words.filter(word => !/^dr\.?$/i.test(word));
+  if (filtered.some(word => TITLE_WORDS.includes(word.toLowerCase()))) return false;
+  if (filtered.some(word => CREDENTIAL_WORDS.includes(word.toLowerCase()))) return false;
+  return filtered.filter(word => /^[A-Z][A-Za-z.'-]+$/.test(word)).length >= 2;
 }
 
 function isLikelyTitle(value: string) {
   const lower = value.toLowerCase();
-  return TITLE_WORDS.some(token => lower.includes(token));
+  return TITLE_WORDS.some(token => lower.includes(token)) || SPECIALTY_WORDS.some(token => lower.includes(token));
 }
 
 function isLikelyCompany(value: string) {
@@ -608,6 +650,16 @@ function looksLikeAddressContinuation(value: string) {
 
 function looksLikeDecorativeNoise(value: string) {
   return /^[|.+\-_/\\\s]+$/.test(value);
+}
+
+function looksLikeCredentialLine(value: string) {
+  const tokens = value.toLowerCase().split(/[\s,./-]+/).filter(Boolean);
+  return tokens.length > 0 && tokens.every(token => CREDENTIAL_WORDS.includes(token));
+}
+
+function isSpecialtyHeading(value: string) {
+  const lower = value.toLowerCase();
+  return SPECIALTY_WORDS.some(token => lower.includes(token));
 }
 
 function clamp(value: number) {

@@ -40,7 +40,7 @@ import { theme } from "./theme";
 
 type IntakeMode = "Scan from camera" | "Import image" | "Import screenshot";
 type AssignmentMode = "replace" | "append";
-type CompactPanel = "capture" | "review" | "fix" | "saved" | "admin";
+type CompactPanel = "capture" | "review" | "fix" | "saved";
 
 const intakeOptions: Array<{ title: IntakeMode; subtitle: string; badge: string }> = [
   { title: "Scan from camera", subtitle: "Capture a physical card with the phone camera.", badge: "Camera" },
@@ -52,8 +52,7 @@ const compactPanels: Array<{ key: CompactPanel; label: string }> = [
   { key: "capture", label: "Capture" },
   { key: "review", label: "Review" },
   { key: "fix", label: "Fix" },
-  { key: "saved", label: "Saved" },
-  { key: "admin", label: "Admin" }
+  { key: "saved", label: "Saved" }
 ];
 
 const fieldOrder: Array<{ key: keyof ContactDraft; label: string; keyboard?: "default" | "email-address" | "phone-pad" | "url" }> = [
@@ -123,6 +122,7 @@ export function AppShell() {
     status: "idle",
     message: ""
   });
+  const [showAdminPanel, setShowAdminPanel] = useState(false);
 
   useEffect(() => {
     setSavedContacts(loadSavedContacts());
@@ -489,9 +489,16 @@ export function AppShell() {
     <ScrollView style={styles.screen} contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
       <View style={[styles.shell, isCompactScreen && styles.shellCompact]}>
         <View style={styles.headerCard}>
-          <Text style={styles.eyebrow}>Business Card Depot</Text>
-          <Text style={[styles.title, isCompactScreen && styles.titleCompact]}>Scan, clean, save.</Text>
-          <Text style={styles.headerBody}>Built for card-sized review on phone, with faster OCR cleanup.</Text>
+          <View style={styles.headerTopRow}>
+            <View style={styles.headerCopy}>
+              <Text style={styles.eyebrow}>Business Card Depot</Text>
+              <Text style={[styles.title, isCompactScreen && styles.titleCompact]}>Scan, clean, save.</Text>
+              <Text style={styles.headerBody}>Built for card-sized review on phone, with faster OCR cleanup.</Text>
+            </View>
+            <Pressable style={styles.adminLaunchButton} onPress={() => setShowAdminPanel(true)}>
+              <Text style={styles.adminLaunchButtonText}>Admin</Text>
+            </Pressable>
+          </View>
         </View>
 
         <View style={styles.statusBar}>
@@ -842,8 +849,8 @@ export function AppShell() {
           </View>
         ) : null}
 
-        {shouldShowPanel("admin") ? (
-          <View style={styles.cardPanel}>
+        {showAdminPanel ? (
+          <View style={[styles.cardPanel, styles.adminPanel]}>
             <PanelHeader title="5. Admin" meta="Google Sheets" />
 
             <View style={styles.toggleRow}>
@@ -909,6 +916,10 @@ export function AppShell() {
                 <Text style={styles.secondaryButtonText}>Reset admin</Text>
               </Pressable>
             </View>
+
+            <Pressable style={[styles.actionButton, styles.secondaryButton]} onPress={() => setShowAdminPanel(false)}>
+              <Text style={styles.secondaryButtonText}>Close admin</Text>
+            </Pressable>
           </View>
         ) : null}
       </View>
@@ -972,6 +983,27 @@ const styles = StyleSheet.create({
     paddingHorizontal: 18,
     paddingVertical: 18,
     gap: 6
+  },
+  headerTopRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    gap: 12
+  },
+  headerCopy: {
+    flex: 1,
+    gap: 6
+  },
+  adminLaunchButton: {
+    borderRadius: 999,
+    backgroundColor: "#eee4d5",
+    paddingHorizontal: 14,
+    paddingVertical: 10
+  },
+  adminLaunchButtonText: {
+    color: theme.colors.text,
+    fontSize: 13,
+    fontWeight: "700"
   },
   eyebrow: {
     color: theme.colors.brand,
@@ -1055,6 +1087,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 16,
     gap: 12
+  },
+  adminPanel: {
+    borderColor: theme.colors.brand
   },
   sectionHead: {
     flexDirection: "row",
