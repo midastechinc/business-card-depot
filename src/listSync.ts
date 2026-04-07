@@ -9,7 +9,7 @@ export async function syncSavedContactToGoogleSheets(savedEntry: SavedContactEnt
   const response = await fetch(targetUrl, {
     method: "POST",
     headers: {
-      "Content-Type": "application/json"
+      "Content-Type": "text/plain;charset=utf-8"
     },
     body: JSON.stringify({
       sourceApp: "Business Card Depot",
