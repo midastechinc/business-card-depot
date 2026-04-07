@@ -49,73 +49,104 @@ export const emptyDraft: ContactDraft = {
 
 type SourceType = "card" | "screenshot";
 
+type Candidate = {
+  value: string;
+  score: number;
+  confidence: "high" | "medium" | "low";
+  indices: number[];
+};
+
 type NormalizedLine = {
   raw: string;
   cleaned: string;
   lower: string;
   index: number;
+  blockIndex: number;
   topScore: number;
+  leftScore: number;
+  widthScore: number;
+  band: "top" | "middle" | "bottom";
+  wordCount: number;
   hasDigits: boolean;
   hasEmail: boolean;
   hasWebsite: boolean;
   labels: string[];
-};
-
-type Candidate = {
-  value: string;
-  confidence: "high" | "medium" | "low";
-  score: number;
+  isUpperCaseish: boolean;
 };
 
 const TITLE_WORDS = [
-  "director",
-  "manager",
-  "president",
-  "owner",
   "advisor",
-  "specialist",
+  "associate",
+  "broker",
+  "business",
+  "coordinator",
   "consultant",
   "developer",
-  "coordinator",
-  "sales",
-  "business",
-  "founder",
-  "marketing",
-  "account",
-  "operations",
-  "executive",
+  "director",
   "engineer",
-  "associate",
-  "representative",
+  "executive",
+  "founder",
+  "lead",
+  "manager",
+  "marketing",
   "officer",
-  "consulting",
-  "lead"
+  "operations",
+  "owner",
+  "president",
+  "representative",
+  "sales",
+  "service",
+  "specialist",
+  "title",
+  "vice president"
 ];
 
 const COMPANY_WORDS = [
-  "inc",
-  "corp",
-  "group",
-  "solutions",
-  "advisory",
+  "agency",
+  "auto",
+  "bank",
+  "college",
+  "company",
   "consulting",
+  "corp",
+  "dealership",
+  "group",
+  "inc",
+  "lexus",
+  "limited",
   "ltd",
   "llc",
-  "company",
+  "motors",
+  "organization",
+  "solutions",
   "studio",
   "systems",
   "technologies",
-  "lexus",
   "toyota",
-  "honda",
-  "ford",
-  "auto",
-  "motors",
-  "dealership",
-  "agency",
-  "bank",
-  "university",
-  "college"
+  "university"
+];
+
+const ADDRESS_WORDS = [
+  "street",
+  "st",
+  "road",
+  "rd",
+  "avenue",
+  "ave",
+  "boulevard",
+  "blvd",
+  "drive",
+  "dr",
+  "suite",
+  "unit",
+  "floor",
+  "court",
+  "way",
+  "plaza",
+  "canada",
+  "ontario",
+  "alberta",
+  "quebec"
 ];
 
 export function parseContactFromText(text: string, sourceType: SourceType = "card"): ParsedContactResult {
@@ -125,7 +156,7 @@ export function parseContactFromText(text: string, sourceType: SourceType = "car
       lines: text
         .replace(/\r/g, "")
         .split("\n")
-        .map(line => ({ text: line })),
+        .map((line, index) => ({ text: line, lineIndex: index })),
       engine: "web-tesseract"
     },
     sourceType
@@ -136,72 +167,77 @@ export function parseContactFromOcr(payload: OcrPayload, sourceType: SourceType 
   const normalizedText = payload.text.replace(/\r/g, "");
   const lines = normalizeLines(payload.lines, normalizedText);
 
-  const emailCandidate = candidateFromValue(
-    findLabeledValue(lines, ["email", "e-mail"]) || firstMatch(normalizedText, /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i),
-    "high",
-    18
-  );
-  const websiteCandidate = candidateFromValue(
-    findLabeledValue(lines, ["web", "website"]) || extractWebsite(normalizedText),
-    "medium",
-    12
-  );
-  const phones = extractPhones(lines);
-  const addressCandidate = findAddress(lines, emailCandidate.value, websiteCandidate.value, phones.mobile.value, phones.office.value);
-  const companyCandidates = rankLines(lines, line => scoreCompany(line, sourceType), [emailCandidate.value, websiteCandidate.value, addressCandidate.value]);
-  const nameCandidates = rankLines(lines, line => scoreName(line, companyCandidates[0]?.value ?? "", sourceType), [
-    emailCandidate.value,
-    websiteCandidate.value,
-    addressCandidate.value
+  const emailCandidates = buildEmailCandidates(lines, normalizedText);
+  const websiteCandidates = buildWebsiteCandidates(lines, normalizedText);
+  const phoneCandidates = buildPhoneCandidates(lines);
+  const addressCandidates = buildAddressCandidates(lines, [
+    ...emailCandidates.map(candidate => candidate.value),
+    ...websiteCandidates.map(candidate => candidate.value),
+    ...phoneCandidates.mobile.map(candidate => candidate.value),
+    ...phoneCandidates.office.map(candidate => candidate.value)
   ]);
-  const titleCandidates = rankLines(
-    lines,
-    line => scoreTitle(line, nameCandidates[0]?.value ?? "", companyCandidates[0]?.value ?? "", sourceType),
-    [emailCandidate.value, websiteCandidate.value, addressCandidate.value]
-  );
+  const companyCandidates = buildCompanyCandidates(lines, sourceType);
+  const titleCandidates = buildTitleCandidates(lines, sourceType, companyCandidates);
+  const nameCandidates = buildNameCandidates(lines, sourceType, companyCandidates, titleCandidates);
 
-  const fullName = toCandidate(nameCandidates[0]);
-  const company = toCandidate(companyCandidates[0]);
-  const title = toCandidate(titleCandidates[0]);
-  const notesValue = buildNotes(lines, [
-    fullName.value,
-    company.value,
-    title.value,
-    emailCandidate.value,
-    websiteCandidate.value,
-    phones.mobile.value,
-    phones.office.value,
-    addressCandidate.value
+  const fullName = chooseDistinctCandidate(nameCandidates);
+  const company = chooseDistinctCandidate(companyCandidates, [fullName.value]);
+  const title = chooseDistinctCandidate(titleCandidates, [fullName.value, company.value]);
+  const email = chooseDistinctCandidate(emailCandidates);
+  const website = chooseDistinctCandidate(websiteCandidates, [email.value]);
+  const officePhone = chooseDistinctCandidate(phoneCandidates.office);
+  const mobilePhone = chooseDistinctCandidate(phoneCandidates.mobile, [officePhone.value]);
+  const address = chooseDistinctCandidate(addressCandidates, [
+    email.value,
+    website.value,
+    officePhone.value,
+    mobilePhone.value
   ]);
+
+  const draft: ContactDraft = {
+    fullName: fullName.value,
+    company: company.value,
+    title: title.value,
+    mobilePhone: mobilePhone.value,
+    officePhone: officePhone.value,
+    email: email.value,
+    website: website.value,
+    address: address.value,
+    notes: buildNotes(lines, [
+      fullName.value,
+      company.value,
+      title.value,
+      mobilePhone.value,
+      officePhone.value,
+      email.value,
+      website.value,
+      address.value
+    ])
+  };
 
   return {
-    draft: {
-      fullName: fullName.value,
-      company: company.value,
-      title: title.value,
-      mobilePhone: phones.mobile.value,
-      officePhone: phones.office.value,
-      email: emailCandidate.value,
-      website: websiteCandidate.value,
-      address: addressCandidate.value,
-      notes: notesValue
-    },
+    draft,
     fieldConfidence: {
       fullName: fullName.confidence,
       company: company.confidence,
       title: title.confidence,
-      mobilePhone: phones.mobile.confidence,
-      officePhone: phones.office.confidence,
-      email: emailCandidate.confidence,
-      website: websiteCandidate.confidence,
-      address: addressCandidate.confidence,
-      notes: notesValue ? "medium" : "low"
+      mobilePhone: mobilePhone.confidence,
+      officePhone: officePhone.confidence,
+      email: email.confidence,
+      website: website.confidence,
+      address: address.confidence,
+      notes: draft.notes ? "medium" : "low"
     },
     lines: lines.map(line => line.cleaned),
     suggestions: {
       fullName: nameCandidates.slice(0, 3).map(candidate => candidate.value),
       company: companyCandidates.slice(0, 3).map(candidate => candidate.value),
-      title: titleCandidates.slice(0, 3).map(candidate => candidate.value)
+      title: titleCandidates.slice(0, 3).map(candidate => candidate.value),
+      email: emailCandidates.slice(0, 3).map(candidate => candidate.value),
+      website: websiteCandidates.slice(0, 3).map(candidate => candidate.value),
+      mobilePhone: phoneCandidates.mobile.slice(0, 3).map(candidate => candidate.value),
+      officePhone: phoneCandidates.office.slice(0, 3).map(candidate => candidate.value),
+      address: addressCandidates.slice(0, 3).map(candidate => candidate.value)
     }
   };
 }
@@ -213,30 +249,43 @@ function normalizeLines(inputLines: OcrInputLine[], fallbackText: string) {
 
   const positioned = source
     .map((line, index) => ({
-      index,
       raw: line.text ?? "",
       top: line.top ?? line.lineIndex ?? index,
-      left: line.left ?? 0
+      left: line.left ?? 0,
+      right: line.right ?? (line.left ?? 0) + 1,
+      blockIndex: line.blockIndex ?? 0,
+      lineIndex: line.lineIndex ?? index
     }))
     .filter(line => line.raw.trim().length > 0)
     .sort((left, right) => left.top - right.top || left.left - right.left);
 
-  const maxTop = positioned[positioned.length - 1]?.top ?? 1;
+  const maxTop = positioned[positioned.length - 1]?.top || 1;
+  const minLeft = Math.min(...positioned.map(line => line.left), 0);
+  const maxRight = Math.max(...positioned.map(line => line.right), 1);
+  const fullWidth = Math.max(maxRight - minLeft, 1);
 
-  return positioned.map((line, index) => {
+  return positioned.map((line, index): NormalizedLine => {
     const cleaned = cleanOcrLine(line.raw);
     const lower = cleaned.toLowerCase();
+    const widthScore = clamp((line.right - line.left) / fullWidth);
+    const topScore = clamp(line.top / maxTop);
 
     return {
       raw: line.raw,
       cleaned,
       lower,
       index,
-      topScore: maxTop === 0 ? 0 : line.top / maxTop,
+      blockIndex: line.blockIndex,
+      topScore,
+      leftScore: clamp((line.left - minLeft) / fullWidth),
+      widthScore,
+      band: topScore < 0.33 ? "top" : topScore > 0.66 ? "bottom" : "middle",
+      wordCount: cleaned.split(/\s+/).filter(Boolean).length,
       hasDigits: /\d/.test(cleaned),
       hasEmail: /@/.test(cleaned),
       hasWebsite: /\b(?:www\.|https?:\/\/|[a-z0-9-]+\.[a-z]{2,})/i.test(cleaned),
-      labels: extractLabels(lower)
+      labels: extractLabels(lower),
+      isUpperCaseish: cleaned === cleaned.toUpperCase() && /[A-Z]/.test(cleaned)
     };
   });
 }
@@ -246,9 +295,10 @@ function cleanOcrLine(value: string) {
     .replace(/\s+/g, " ")
     .replace(/[•·]/g, " ")
     .replace(/\s*\|\s*/g, " | ")
-    .replace(/[^\S\r\n]+/g, " ")
     .replace(/\bwww\s+/gi, "www.")
     .replace(/\s*@\s*/g, "@")
+    .replace(/[^\S\r\n]+/g, " ")
+    .replace(/[|]{2,}/g, "|")
     .trim();
 }
 
@@ -265,192 +315,246 @@ function extractLabels(lower: string) {
   return labels;
 }
 
-function candidateFromValue(value: string, confidence: "high" | "medium" | "low", score: number): Candidate {
-  return {
-    value: value.trim(),
-    confidence: value ? confidence : "low",
-    score: value ? score : 0
-  };
-}
+function buildEmailCandidates(lines: NormalizedLine[], text: string) {
+  const candidates = collectRegexCandidates(lines, /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, candidate => ({
+    ...candidate,
+    score: candidate.score + 18,
+    confidence: "high"
+  }));
 
-function toCandidate(candidate?: Pick<Candidate, "value" | "score"> | Candidate): Candidate {
-  if (!candidate?.value) {
-    return { value: "", confidence: "low", score: 0 };
+  const fallback = text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)?.[0];
+  if (fallback) {
+    candidates.push(makeCandidate(fallback, 12, "high"));
   }
 
-  return {
-    value: candidate.value,
-    confidence: candidate.score >= 14 ? "high" : candidate.score >= 8 ? "medium" : "low",
-    score: candidate.score
-  };
+  return dedupeCandidates(candidates.filter(candidate => isValidEmail(candidate.value)));
 }
 
-function rankLines(
-  lines: NormalizedLine[],
-  scorer: (line: NormalizedLine) => number,
-  consumedValues: string[]
-) {
-  const consumed = new Set(consumedValues.filter(Boolean));
+function buildWebsiteCandidates(lines: NormalizedLine[], text: string) {
+  const candidates = collectRegexCandidates(lines, /(?:https?:\/\/)?(?:www\.)?[a-z0-9-]+\.[a-z]{2,}(?:\/[^\s]*)?/gi, candidate => ({
+    ...candidate,
+    score: candidate.score + 12,
+    confidence: "medium"
+  })).filter(candidate => !candidate.value.includes("@") && isValidWebsite(candidate.value));
 
-  return lines
-    .filter(line => !consumed.has(line.cleaned))
-    .map(line => ({ value: line.cleaned, score: scorer(line) }))
-    .filter(candidate => candidate.score > 0)
-    .sort((left, right) => right.score - left.score);
+  const fallback = extractWebsite(text);
+  if (fallback) {
+    candidates.push(makeCandidate(fallback, 10, "medium"));
+  }
+
+  return dedupeCandidates(candidates);
 }
 
-function scoreName(line: NormalizedLine, companyValue: string, sourceType: SourceType) {
-  const value = line.cleaned;
-  const words = value.split(/\s+/);
+function buildPhoneCandidates(lines: NormalizedLine[]) {
+  const mobile: Candidate[] = [];
+  const office: Candidate[] = [];
 
-  if (!/^[A-Za-z][A-Za-z\s.'-]{3,}$/.test(value)) return -12;
-  if (words.length < 2 || words.length > 4) return -8;
-  if (line.hasEmail || line.hasWebsite || line.hasDigits) return -12;
-  if (looksLikeAddress(line.cleaned) || isLikelyPhoneLabel(line.lower)) return -10;
+  lines.forEach(line => {
+    const matches = line.cleaned.match(/(?:\+\d{1,2}\s*)?(?:\(?\d{3}\)?[\s./-]*)\d{3}[\s./-]*\d{4}/g) ?? [];
+    if (matches.length === 0) return;
 
-  let score = 0;
-  if (line.labels.includes("name")) score += 14;
-  if (words.every(word => /^[A-Z][A-Za-z.'-]+$/.test(word))) score += 8;
-  if (line.topScore > 0.35) score += 4;
-  if (line.topScore > 0.55) score += 3;
-  if (!isLikelyCompany(line.cleaned)) score += 3;
-  if (!isLikelyTitle(line.cleaned)) score += 3;
-  if (companyValue && line.cleaned !== companyValue && Math.abs(words.length - companyValue.split(/\s+/).length) > 0) score += 1;
-  if (sourceType === "screenshot") score += 1;
-  if (/^[A-Z\s]+$/.test(value)) score -= 5;
-  if (isLikelyCompany(value)) score -= 4;
-  if (isLikelyTitle(value)) score -= 3;
-  return score;
-}
+    matches.forEach((match, matchIndex) => {
+      const normalized = normalizePhone(match);
+      if (!isValidPhone(normalized)) return;
 
-function scoreCompany(line: NormalizedLine, sourceType: SourceType) {
-  if (line.hasEmail || line.hasWebsite) return -10;
-  if (looksLikeAddress(line.cleaned) || isLikelyPhoneLabel(line.lower)) return -10;
+      const baseScore = 8 + (line.labels.includes("office") || line.labels.includes("mobile") ? 6 : 0);
+      const candidate = makeCandidate(normalized, baseScore, baseScore >= 14 ? "high" : "medium", [line.index]);
 
-  let score = 0;
-  if (line.labels.includes("company")) score += 14;
-  if (isLikelyCompany(line.cleaned)) score += 8;
-  if (line.cleaned.includes("|")) score += 4;
-  if (/^[A-Z0-9\s|&-]{6,}$/.test(line.cleaned)) score += 4;
-  if (line.topScore < 0.35) score += 4;
-  if (sourceType === "screenshot" && line.topScore < 0.55) score += 2;
-  if (isLikelyTitle(line.cleaned)) score -= 4;
-  if (/^[A-Z][a-z]+ [A-Z][a-z]+$/.test(line.cleaned)) score -= 5;
-  return score;
-}
-
-function scoreTitle(line: NormalizedLine, nameValue: string, companyValue: string, sourceType: SourceType) {
-  if (!line.cleaned || line.cleaned === nameValue || line.cleaned === companyValue) return -10;
-  if (line.hasEmail || line.hasWebsite || line.hasDigits) return -10;
-  if (looksLikeAddress(line.cleaned)) return -10;
-
-  let score = 0;
-  if (line.labels.includes("title")) score += 14;
-  if (isLikelyTitle(line.cleaned)) score += 8;
-  if (/\b(new|used|car|auto|sales|service|associate|manager|director|advisor)\b/i.test(line.cleaned)) score += 5;
-  if (line.topScore > 0.3) score += 2;
-  if (sourceType === "screenshot") score += 1;
-  if (isLikelyCompany(line.cleaned)) score -= 3;
-  return score;
-}
-
-function findAddress(
-  lines: NormalizedLine[],
-  email: string,
-  website: string,
-  mobilePhone: string,
-  officePhone: string
-) {
-  const candidates = lines.filter(line => {
-    const value = line.cleaned;
-    return value
-      && value !== email
-      && value !== website
-      && value !== mobilePhone
-      && value !== officePhone
-      && looksLikeAddress(value);
+      if (line.labels.includes("mobile") || /\bcell|mobile|direct\b/i.test(line.cleaned)) {
+        mobile.push({ ...candidate, score: candidate.score + 8, confidence: "high" });
+      } else if (line.labels.includes("office") || /\bmain|office|tel|phone|ext\b/i.test(line.cleaned)) {
+        office.push({ ...candidate, score: candidate.score + 8, confidence: "high" });
+      } else if (matchIndex === 0) {
+        office.push(candidate);
+      } else {
+        mobile.push(candidate);
+      }
+    });
   });
 
-  if (candidates.length === 0) {
-    return candidateFromValue("", "low", 0);
-  }
-
-  const selected: string[] = [];
-  for (let index = 0; index < candidates.length; index += 1) {
-    const current = candidates[index];
-    selected.push(current.cleaned);
-
-    const next = candidates[index + 1];
-    if (next && Math.abs(next.index - current.index) <= 1 && looksLikeAddressContinuation(next.cleaned)) {
-      selected.push(next.cleaned);
-      break;
-    }
-  }
-
-  return candidateFromValue(selected.join(", "), selected.length > 1 ? "high" : "medium", selected.length > 1 ? 15 : 9);
+  return {
+    mobile: dedupeCandidates(mobile),
+    office: dedupeCandidates(office)
+  };
 }
 
-function extractPhones(lines: NormalizedLine[]) {
-  let mobile = candidateFromValue("", "low", 0);
-  let office = candidateFromValue("", "low", 0);
+function buildAddressCandidates(lines: NormalizedLine[], consumedValues: string[]) {
+  const consumed = new Set(consumedValues.filter(Boolean));
+  const candidates: Candidate[] = [];
 
-  for (const line of lines) {
-    const matches = line.cleaned.match(/(?:\+\d{1,2}\s*)?(?:\(?\d{3}\)?[\s./-]*)\d{3}[\s./-]*\d{4}/g) ?? [];
-    if (matches.length === 0) continue;
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (consumed.has(line.cleaned) || !looksLikeAddress(line.cleaned)) continue;
 
-    const primary = normalizePhone(matches[0] ?? "");
-    const secondary = matches[1] ? normalizePhone(matches[1]) : "";
+    const parts = [line.cleaned];
+    const indices = [line.index];
+    const next = lines[index + 1];
+    const nextTwo = lines[index + 2];
 
-    if (!mobile.value && (line.labels.includes("mobile") || /\bcell\b/i.test(line.cleaned))) {
-      mobile = candidateFromValue(primary, "high", 18);
+    if (next && !consumed.has(next.cleaned) && looksLikeAddressContinuation(next.cleaned)) {
+      parts.push(next.cleaned);
+      indices.push(next.index);
+    } else if (next && !consumed.has(next.cleaned) && next.band === line.band && next.wordCount <= 5 && looksGeoSpecific(next.cleaned)) {
+      parts.push(next.cleaned);
+      indices.push(next.index);
     }
 
-    if (!office.value && (line.labels.includes("office") || /\b(main|office|tel|ext)\b/i.test(line.cleaned))) {
-      office = candidateFromValue(primary, "high", 18);
-      if (!mobile.value && secondary) {
-        mobile = candidateFromValue(secondary, "medium", 10);
+    if (nextTwo && !consumed.has(nextTwo.cleaned) && parts.length === 2 && looksGeoSpecific(nextTwo.cleaned)) {
+      parts.push(nextTwo.cleaned);
+      indices.push(nextTwo.index);
+    }
+
+    const value = parts.join(", ");
+    let score = 10;
+    if (parts.length > 1) score += 6;
+    if (/\b(canada|usa|ontario|alberta|quebec)\b/i.test(value)) score += 3;
+    if (/[A-Z]\d[A-Z]\s?\d[A-Z]\d/i.test(value)) score += 3;
+
+    candidates.push(makeCandidate(value, score, score >= 15 ? "high" : "medium", indices));
+  }
+
+  return dedupeCandidates(candidates);
+}
+
+function buildCompanyCandidates(lines: NormalizedLine[], sourceType: SourceType) {
+  return dedupeCandidates(
+    lines
+      .filter(line => !line.hasEmail && !line.hasWebsite && !looksLikeAddress(line.cleaned) && !isLikelyPhoneLabel(line.lower))
+      .map(line => {
+        let score = 0;
+        if (line.labels.includes("company")) score += 14;
+        if (isLikelyCompany(line.cleaned)) score += 8;
+        if (line.band === "top") score += 6;
+        if (line.widthScore > 0.45) score += 3;
+        if (line.isUpperCaseish) score += 4;
+        if (line.cleaned.includes("|")) score += 3;
+        if (sourceType === "screenshot" && line.band !== "bottom") score += 2;
+        if (looksLikePersonName(line.cleaned)) score -= 5;
+        if (isLikelyTitle(line.cleaned)) score -= 4;
+        return makeCandidate(line.cleaned, score, score >= 15 ? "high" : score >= 9 ? "medium" : "low", [line.index]);
+      })
+      .filter(candidate => candidate.score > 4)
+  );
+}
+
+function buildTitleCandidates(lines: NormalizedLine[], sourceType: SourceType, companyCandidates: Candidate[]) {
+  const primaryCompany = companyCandidates[0]?.value ?? "";
+
+  return dedupeCandidates(
+    lines
+      .filter(line => line.cleaned !== primaryCompany && !line.hasEmail && !line.hasWebsite && !line.hasDigits && !looksLikeAddress(line.cleaned))
+      .map(line => {
+        let score = 0;
+        if (line.labels.includes("title")) score += 14;
+        if (isLikelyTitle(line.cleaned)) score += 10;
+        if (line.band === "bottom") score += 4;
+        if (sourceType === "screenshot" && line.band !== "top") score += 1;
+        if (line.wordCount >= 2 && line.wordCount <= 6) score += 2;
+        if (isLikelyCompany(line.cleaned)) score -= 5;
+        return makeCandidate(line.cleaned, score, score >= 15 ? "high" : score >= 9 ? "medium" : "low", [line.index]);
+      })
+      .filter(candidate => candidate.score > 4)
+  );
+}
+
+function buildNameCandidates(lines: NormalizedLine[], sourceType: SourceType, companyCandidates: Candidate[], titleCandidates: Candidate[]) {
+  const primaryCompany = companyCandidates[0]?.value ?? "";
+  const titleIndexes = titleCandidates.flatMap(candidate => candidate.indices);
+
+  return dedupeCandidates(
+    lines
+      .filter(line => line.cleaned !== primaryCompany && !line.hasEmail && !line.hasWebsite && !line.hasDigits && !looksLikeAddress(line.cleaned))
+      .map(line => {
+        let score = 0;
+        if (line.labels.includes("name")) score += 14;
+        if (looksLikePersonName(line.cleaned)) score += 12;
+        if (line.wordCount >= 2 && line.wordCount <= 4) score += 3;
+        if (line.band === "bottom") score += 5;
+        if (line.band === "middle") score += 2;
+        if (titleIndexes.some(index => Math.abs(index - line.index) <= 1)) score += 5;
+        if (sourceType === "screenshot") score += 1;
+        if (line.isUpperCaseish) score -= 3;
+        if (isLikelyCompany(line.cleaned)) score -= 6;
+        if (isLikelyTitle(line.cleaned)) score -= 4;
+        return makeCandidate(line.cleaned, score, score >= 16 ? "high" : score >= 10 ? "medium" : "low", [line.index]);
+      })
+      .filter(candidate => candidate.score > 5)
+  );
+}
+
+function chooseDistinctCandidate(candidates: Candidate[], disallowedValues: string[] = []) {
+  const disallowed = new Set(disallowedValues.filter(Boolean).map(normalizeComparable));
+  const selected = candidates.find(candidate => !disallowed.has(normalizeComparable(candidate.value)));
+  return selected ?? makeCandidate("", 0, "low");
+}
+
+function buildNotes(lines: NormalizedLine[], consumedValues: string[]) {
+  const consumed = new Set(consumedValues.filter(Boolean).map(normalizeComparable));
+
+  return lines
+    .map(line => line.cleaned)
+    .filter(value => !consumed.has(normalizeComparable(value)))
+    .filter(value => !looksLikeDecorativeNoise(value))
+    .join(" | ");
+}
+
+function collectRegexCandidates(
+  lines: NormalizedLine[],
+  pattern: RegExp,
+  scorer: (candidate: Candidate) => Candidate
+) {
+  const candidates: Candidate[] = [];
+
+  lines.forEach(line => {
+    const matches = line.cleaned.match(pattern) ?? [];
+    matches.forEach(match => {
+      const baseScore = 6 + (line.labels.length > 0 ? 4 : 0) + (line.widthScore > 0.3 ? 1 : 0);
+      candidates.push(scorer(makeCandidate(match, baseScore, "medium", [line.index])));
+    });
+  });
+
+  return candidates;
+}
+
+function makeCandidate(value: string, score: number, confidence: "high" | "medium" | "low", indices: number[] = []): Candidate {
+  return {
+    value: value.trim(),
+    score,
+    confidence,
+    indices
+  };
+}
+
+function dedupeCandidates(candidates: Candidate[]) {
+  const seen = new Map<string, Candidate>();
+
+  candidates
+    .filter(candidate => candidate.value)
+    .forEach(candidate => {
+      const key = normalizeComparable(candidate.value);
+      const existing = seen.get(key);
+      if (!existing || candidate.score > existing.score) {
+        seen.set(key, candidate);
       }
-    }
-  }
+    });
 
-  const allPhones = lines
-    .flatMap(line => line.cleaned.match(/(?:\+\d{1,2}\s*)?(?:\(?\d{3}\)?[\s./-]*)\d{3}[\s./-]*\d{4}/g) ?? [])
-    .map(normalizePhone);
+  return Array.from(seen.values()).sort((left, right) => right.score - left.score);
+}
 
-  if (!office.value && allPhones[0]) {
-    office = candidateFromValue(allPhones[0], "medium", 10);
-  }
-  const fallbackMobile = allPhones.find(phone => phone !== office.value) ?? "";
-  if (!mobile.value && fallbackMobile) {
-    mobile = candidateFromValue(fallbackMobile, "medium", 10);
-  }
-
-  return { mobile, office };
+function normalizeComparable(value: string) {
+  return value.toLowerCase().replace(/\s+/g, " ").trim();
 }
 
 function normalizePhone(value: string) {
   return value.replace(/\s+/g, " ").trim();
 }
 
-function findLabeledValue(lines: NormalizedLine[], labels: string[]) {
-  for (const line of lines) {
-    const matchedLabel = labels.find(label => line.lower.includes(label));
-    if (!matchedLabel) continue;
-
-    const pattern = new RegExp(`^.*?${matchedLabel}\\s*[:|-]?\\s*`, "i");
-    const cleaned = line.cleaned.replace(pattern, "").trim();
-    if (cleaned) return cleaned;
-  }
-  return "";
-}
-
-function extractWebsite(value: string) {
-  const matches = value.match(/(?:https?:\/\/)?(?:www\.)?[a-z0-9-]+\.[a-z]{2,}(?:\/[^\s]*)?/gi) ?? [];
-  return matches.find(candidate => !candidate.includes("@")) ?? "";
-}
-
-function firstMatch(value: string, pattern: RegExp) {
-  return value.match(pattern)?.[0] ?? "";
+function looksLikePersonName(value: string) {
+  if (!/^[A-Za-z][A-Za-z\s.'-]{3,}$/.test(value)) return false;
+  const words = value.split(/\s+/).filter(Boolean);
+  if (words.length < 2 || words.length > 4) return false;
+  if (words.some(word => TITLE_WORDS.includes(word.toLowerCase()))) return false;
+  return words.filter(word => /^[A-Z][A-Za-z.'-]+$/.test(word)).length >= 2;
 }
 
 function isLikelyTitle(value: string) {
@@ -460,35 +564,56 @@ function isLikelyTitle(value: string) {
 
 function isLikelyCompany(value: string) {
   const lower = value.toLowerCase();
-  return COMPANY_WORDS.some(token => lower.includes(token)) || /^[A-Z0-9\s|&-]{6,}$/.test(value);
+  return COMPANY_WORDS.some(token => lower.includes(token)) || (/^[A-Z0-9\s|&-]{6,}$/.test(value) && value.split(/\s+/).length >= 2);
 }
 
 function isLikelyPhoneLabel(lower: string) {
   return /\b(cell|mobile|main|office|tel|phone|ext)\b/.test(lower);
 }
 
+function isValidEmail(value: string) {
+  return /^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$/i.test(value);
+}
+
+function isValidWebsite(value: string) {
+  return /^(?:https?:\/\/)?(?:www\.)?[a-z0-9-]+\.[a-z]{2,}(?:\/[^\s]*)?$/i.test(value);
+}
+
+function isValidPhone(value: string) {
+  const digits = value.replace(/\D/g, "");
+  return digits.length >= 10 && digits.length <= 12;
+}
+
+function extractWebsite(value: string) {
+  const matches = value.match(/(?:https?:\/\/)?(?:www\.)?[a-z0-9-]+\.[a-z]{2,}(?:\/[^\s]*)?/gi) ?? [];
+  return matches.find(candidate => !candidate.includes("@")) ?? "";
+}
+
 function looksLikeAddress(value: string) {
+  const lower = value.toLowerCase();
   return /\d/.test(value) && (
-    /\b(st|street|rd|road|ave|avenue|blvd|drive|dr|unit|suite|floor|plaza|way|court|crt)\b/i.test(value) ||
-    /\b(ontario|alberta|quebec|toronto|richmond hill|vancouver|canada)\b/i.test(value) ||
-    /[A-Z]\d[A-Z]\s?\d[A-Z]\d/i.test(value)
+    ADDRESS_WORDS.some(word => new RegExp(`\\b${escapeRegExp(word)}\\b`, "i").test(value)) ||
+    /[A-Z]\d[A-Z]\s?\d[A-Z]\d/i.test(value) ||
+    /\b[a-z]+,\s*[a-z]+\b/i.test(lower)
   );
 }
 
-function looksLikeAddressContinuation(value: string) {
-  return /\b(ontario|canada)\b/i.test(value) || /[A-Z]\d[A-Z]\s?\d[A-Z]\d/i.test(value);
+function looksGeoSpecific(value: string) {
+  return /\b(canada|usa|ontario|alberta|quebec|toronto|vancouver|richmond hill)\b/i.test(value) || /[A-Z]\d[A-Z]\s?\d[A-Z]\d/i.test(value);
 }
 
-function buildNotes(lines: NormalizedLine[], consumedValues: string[]) {
-  const consumed = new Set(consumedValues.filter(Boolean));
-
-  return lines
-    .map(line => line.cleaned)
-    .filter(line => !consumed.has(line))
-    .filter(line => !looksLikeDecorativeNoise(line))
-    .join(" | ");
+function looksLikeAddressContinuation(value: string) {
+  return looksLikeAddress(value) || looksGeoSpecific(value);
 }
 
 function looksLikeDecorativeNoise(value: string) {
   return /^[|.+\-_/\\\s]+$/.test(value);
+}
+
+function clamp(value: number) {
+  return Math.max(0, Math.min(1, value));
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
