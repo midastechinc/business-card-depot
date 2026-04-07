@@ -34,7 +34,7 @@ import {
   type ParsedContactResult
 } from "./contactParser";
 import { loadSavedContacts, saveSavedContacts } from "./historyStorage";
-import { syncSavedContactToList } from "./listSync";
+import { syncSavedContactToGoogleSheets } from "./listSync";
 import { extractOcrPayloadFromImage } from "./ocr";
 import { theme } from "./theme";
 
@@ -383,21 +383,21 @@ export function AppShell() {
       Alert.alert("Saved", `${getPrimaryLabel(savedEntry.draft)} is now in recent saved contacts.`);
     }
 
-    if (adminSettings.enableListSync && adminSettings.listDatabaseUrl.trim()) {
-      setSyncState({ status: "syncing", message: "Syncing to list database..." });
+    if (adminSettings.enableGoogleSheetsSync && adminSettings.googleSheetsWebhookUrl.trim()) {
+      setSyncState({ status: "syncing", message: "Syncing to Google Sheets..." });
       try {
-        await syncSavedContactToList(savedEntry, adminSettings.listDatabaseUrl);
-        setSyncState({ status: "success", message: "Saved contact also synced to the list database." });
+        await syncSavedContactToGoogleSheets(savedEntry, adminSettings.googleSheetsWebhookUrl);
+        setSyncState({ status: "success", message: "Saved contact also synced to Google Sheets." });
       } catch (error) {
-        const message = error instanceof Error ? error.message : "Could not sync this contact to the list database.";
+        const message = error instanceof Error ? error.message : "Could not sync this contact to Google Sheets.";
         setSyncState({ status: "error", message });
       }
     }
   }
 
   async function sendTestSync() {
-    if (!adminSettings.listDatabaseUrl.trim()) {
-      Alert.alert("Missing URL", "Add the list database URL first.");
+    if (!adminSettings.googleSheetsWebhookUrl.trim()) {
+      Alert.alert("Missing URL", "Add the Google Sheets webhook URL first.");
       return;
     }
 
@@ -414,8 +414,8 @@ export function AppShell() {
 
     setSyncState({ status: "syncing", message: "Sending test payload..." });
     try {
-      await syncSavedContactToList(sampleEntry, adminSettings.listDatabaseUrl);
-      setSyncState({ status: "success", message: "Test payload sent successfully." });
+      await syncSavedContactToGoogleSheets(sampleEntry, adminSettings.googleSheetsWebhookUrl);
+      setSyncState({ status: "success", message: "Test payload reached the Google Sheets webhook." });
     } catch (error) {
       const message = error instanceof Error ? error.message : "The test payload could not be sent.";
       setSyncState({ status: "error", message });
@@ -844,28 +844,28 @@ export function AppShell() {
 
         {shouldShowPanel("admin") ? (
           <View style={styles.cardPanel}>
-            <PanelHeader title="5. Admin" meta="Optional sync" />
+            <PanelHeader title="5. Admin" meta="Google Sheets" />
 
             <View style={styles.toggleRow}>
               <View style={styles.toggleCopy}>
-                <Text style={styles.toggleTitle}>Sync saved cards to list database</Text>
-                <Text style={styles.toggleBody}>If enabled, every saved contact will also POST to the URL below.</Text>
+                <Text style={styles.toggleTitle}>Sync saved cards to Google Sheets</Text>
+                <Text style={styles.toggleBody}>If enabled, every saved contact will also POST to your Google Apps Script webhook.</Text>
               </View>
               <Switch
-                value={adminSettings.enableListSync}
-                onValueChange={value => setAdminSettings(current => ({ ...current, enableListSync: value }))}
+                value={adminSettings.enableGoogleSheetsSync}
+                onValueChange={value => setAdminSettings(current => ({ ...current, enableGoogleSheetsSync: value }))}
                 trackColor={{ false: "#d5cab9", true: "#83b3df" }}
-                thumbColor={adminSettings.enableListSync ? theme.colors.brand : "#f7f3ed"}
+                thumbColor={adminSettings.enableGoogleSheetsSync ? theme.colors.brand : "#f7f3ed"}
               />
             </View>
 
             <View style={styles.fieldBlock}>
-              <Text style={styles.fieldLabel}>List database URL</Text>
+              <Text style={styles.fieldLabel}>Google Sheets webhook URL</Text>
               <TextInput
-                value={adminSettings.listDatabaseUrl}
-                onChangeText={value => setAdminSettings(current => ({ ...current, listDatabaseUrl: value }))}
+                value={adminSettings.googleSheetsWebhookUrl}
+                onChangeText={value => setAdminSettings(current => ({ ...current, googleSheetsWebhookUrl: value }))}
                 style={styles.input}
-                placeholder="https://your-list-endpoint.example.com/cards"
+                placeholder="https://script.google.com/macros/s/your-web-app-id/exec"
                 placeholderTextColor={theme.colors.placeholder}
                 autoCapitalize="none"
                 keyboardType="url"
@@ -873,8 +873,8 @@ export function AppShell() {
             </View>
 
             <View style={styles.previewCard}>
-              <Text style={styles.previewEmptyTitle}>Expected payload</Text>
-              <Text style={styles.previewEmptyBody}>The app sends a JSON POST with `sourceApp`, `savedAt`, `source`, and `contact` fields.</Text>
+              <Text style={styles.previewEmptyTitle}>What this expects</Text>
+              <Text style={styles.previewEmptyBody}>Use a deployed Google Apps Script Web App URL. The app sends a JSON POST with `sourceApp`, `savedAt`, `source`, and `contact` fields for the row builder.</Text>
             </View>
 
             {syncState.status !== "idle" ? (
@@ -889,10 +889,10 @@ export function AppShell() {
               </View>
             ) : null}
 
-            <View style={styles.actionRow}>
+              <View style={styles.actionRow}>
               <Pressable
-                style={[styles.actionButton, styles.primaryButton, !adminSettings.listDatabaseUrl.trim() && styles.buttonDisabled]}
-                disabled={!adminSettings.listDatabaseUrl.trim()}
+                style={[styles.actionButton, styles.primaryButton, !adminSettings.googleSheetsWebhookUrl.trim() && styles.buttonDisabled]}
+                disabled={!adminSettings.googleSheetsWebhookUrl.trim()}
                 onPress={() => {
                   void sendTestSync();
                 }}

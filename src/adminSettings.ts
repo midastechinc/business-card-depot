@@ -2,15 +2,15 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Platform } from "react-native";
 
 export type AdminSettings = {
-  enableListSync: boolean;
-  listDatabaseUrl: string;
+  enableGoogleSheetsSync: boolean;
+  googleSheetsWebhookUrl: string;
 };
 
 const STORAGE_KEY = "business-card-depot.admin-settings";
 
 export const defaultAdminSettings: AdminSettings = {
-  enableListSync: false,
-  listDatabaseUrl: ""
+  enableGoogleSheetsSync: false,
+  googleSheetsWebhookUrl: ""
 };
 
 export async function loadAdminSettings(): Promise<AdminSettings> {
@@ -20,8 +20,13 @@ export async function loadAdminSettings(): Promise<AdminSettings> {
   try {
     const parsed = JSON.parse(raw);
     return {
-      enableListSync: Boolean(parsed?.enableListSync),
-      listDatabaseUrl: typeof parsed?.listDatabaseUrl === "string" ? parsed.listDatabaseUrl : ""
+      enableGoogleSheetsSync: Boolean(parsed?.enableGoogleSheetsSync ?? parsed?.enableListSync),
+      googleSheetsWebhookUrl:
+        typeof parsed?.googleSheetsWebhookUrl === "string"
+          ? parsed.googleSheetsWebhookUrl
+          : typeof parsed?.listDatabaseUrl === "string"
+            ? parsed.listDatabaseUrl
+            : ""
     };
   } catch {
     return defaultAdminSettings;

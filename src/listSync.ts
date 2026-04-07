@@ -1,9 +1,9 @@
 import type { SavedContactEntry } from "./contactActions";
 
-export async function syncSavedContactToList(savedEntry: SavedContactEntry, listDatabaseUrl: string) {
-  const targetUrl = listDatabaseUrl.trim();
+export async function syncSavedContactToGoogleSheets(savedEntry: SavedContactEntry, webhookUrl: string) {
+  const targetUrl = webhookUrl.trim();
   if (!targetUrl) {
-    throw new Error("Enter a valid list database URL first.");
+    throw new Error("Enter a valid Google Sheets webhook URL first.");
   }
 
   const response = await fetch(targetUrl, {
@@ -20,7 +20,7 @@ export async function syncSavedContactToList(savedEntry: SavedContactEntry, list
   });
 
   if (!response.ok) {
-    throw new Error(`List sync failed with status ${response.status}.`);
+    throw new Error(`Google Sheets sync failed with status ${response.status}.`);
   }
 
   return response;
