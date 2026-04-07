@@ -25,7 +25,18 @@ import {
   saveDraftToNativeContacts,
   type SavedContactEntry
 } from "./contactActions";
-import { defaultAdminSettings, loadAdminSettings, saveAdminSettings, type AdminSettings } from "./adminSettings";
+import {
+  defaultAdminSettings,
+  hasAiVerificationConfigured,
+  loadAdminSettings,
+  saveAdminSettings,
+  type AdminSettings
+} from "./adminSettings";
+import {
+  mergeAiVerificationIntoParsed,
+  testAiVerificationConnection,
+  verifyParsedContactWithAi
+} from "./aiVerifier";
 import {
   emptyDraft,
   parseContactFromOcr,
@@ -119,6 +130,10 @@ export function AppShell() {
   const [adminSettings, setAdminSettings] = useState<AdminSettings>(defaultAdminSettings);
   const [settingsReady, setSettingsReady] = useState(false);
   const [syncState, setSyncState] = useState<{ status: "idle" | "syncing" | "success" | "error"; message: string }>({
+    status: "idle",
+    message: ""
+  });
+  const [aiState, setAiState] = useState<{ status: "idle" | "verifying" | "success" | "error"; message: string }>({
     status: "idle",
     message: ""
   });
@@ -230,18 +245,38 @@ export function AppShell() {
     setOcrSuggestions({});
     setRawOcrText("");
     setOcrError("");
+    setAiState({ status: "idle", message: "" });
     setAssignmentNotice("");
     setIsRunningOcr(true);
     setCompactPanel("review");
 
     try {
       const payload = await extractOcrPayloadFromImage(uri);
-      const parsedResult = parseContactFromOcr(payload, mode === "Import screenshot" ? "screenshot" : "card");
+      const sourceType = mode === "Import screenshot" ? "screenshot" : "card";
+      let parsedResult = parseContactFromOcr(payload, sourceType);
       const intakeNote = mode === "Import screenshot"
         ? "Imported from a screenshot. Review website and title carefully."
         : mode === "Import image"
           ? "Imported from a saved card image."
           : "Captured from camera.";
+
+      if (hasAiVerificationConfigured(adminSettings)) {
+        setAiState({ status: "verifying", message: "AI verification is checking OCR matches..." });
+
+        try {
+          const aiResult = await verifyParsedContactWithAi({
+            settings: adminSettings,
+            sourceType,
+            ocrText: payload.text,
+            parsedResult
+          });
+          parsedResult = mergeAiVerificationIntoParsed(parsedResult, aiResult);
+          setAiState({ status: "success", message: "AI verification refined the extracted fields." });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "AI verification could not complete.";
+          setAiState({ status: "error", message });
+        }
+      }
 
       setRawOcrText(payload.text);
       setOcrLines(parsedResult.lines);
@@ -279,6 +314,7 @@ export function AppShell() {
     setActiveAssignmentField("fullName");
     setRawOcrText("");
     setOcrError("");
+    setAiState({ status: "idle", message: "" });
     setIsRunningOcr(false);
     setShowRawOcr(false);
     setShowAllOcrLines(false);
@@ -419,6 +455,22 @@ export function AppShell() {
     } catch (error) {
       const message = error instanceof Error ? error.message : "The test payload could not be sent.";
       setSyncState({ status: "error", message });
+    }
+  }
+
+  async function sendTestAiVerification() {
+    if (!hasAiVerificationConfigured(adminSettings)) {
+      Alert.alert("Missing AI settings", "Enable AI verification and add the API URL, API key, and model first.");
+      return;
+    }
+
+    setAiState({ status: "verifying", message: "Testing AI verification connection..." });
+    try {
+      await testAiVerificationConnection(adminSettings);
+      setAiState({ status: "success", message: "AI verification is connected and returned a valid response." });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "The AI verification test failed.";
+      setAiState({ status: "error", message });
     }
   }
 
@@ -588,6 +640,18 @@ export function AppShell() {
               <View style={styles.loadingCard}>
                 <ActivityIndicator size="small" color={theme.colors.brand} />
                 <Text style={styles.loadingText}>Running OCR and matching fields...</Text>
+              </View>
+            ) : null}
+
+            {aiState.status !== "idle" ? (
+              <View style={[
+                styles.syncStateBox,
+                aiState.status === "success" ? styles.syncStateSuccess : aiState.status === "error" ? styles.syncStateError : styles.syncStateProgress
+              ]}>
+                <Text style={styles.syncStateTitle}>
+                  {aiState.status === "success" ? "AI verification applied" : aiState.status === "error" ? "AI verification skipped" : "AI verification running"}
+                </Text>
+                <Text style={styles.syncStateBody}>{aiState.message}</Text>
               </View>
             ) : null}
 
@@ -851,7 +915,75 @@ export function AppShell() {
 
         {showAdminPanel ? (
           <View style={[styles.cardPanel, styles.adminPanel]}>
-            <PanelHeader title="5. Admin" meta="Google Sheets" />
+            <PanelHeader title="5. Admin" meta="Sync + AI" />
+
+            <View style={styles.toggleRow}>
+              <View style={styles.toggleCopy}>
+                <Text style={styles.toggleTitle}>AI verification engine</Text>
+                <Text style={styles.toggleBody}>If enabled, OCR results get a second verification pass from your configured AI API before they land in the review form.</Text>
+              </View>
+              <Switch
+                value={adminSettings.enableAiVerification}
+                onValueChange={value => setAdminSettings(current => ({ ...current, enableAiVerification: value }))}
+                trackColor={{ false: "#d5cab9", true: "#83b3df" }}
+                thumbColor={adminSettings.enableAiVerification ? theme.colors.brand : "#f7f3ed"}
+              />
+            </View>
+
+            <View style={styles.fieldBlock}>
+              <Text style={styles.fieldLabel}>AI API URL</Text>
+              <TextInput
+                value={adminSettings.aiApiUrl}
+                onChangeText={value => setAdminSettings(current => ({ ...current, aiApiUrl: value }))}
+                style={styles.input}
+                placeholder="https://api.openai.com/v1/chat/completions"
+                placeholderTextColor={theme.colors.placeholder}
+                autoCapitalize="none"
+                keyboardType="url"
+              />
+            </View>
+
+            <View style={styles.fieldBlock}>
+              <Text style={styles.fieldLabel}>AI model</Text>
+              <TextInput
+                value={adminSettings.aiModel}
+                onChangeText={value => setAdminSettings(current => ({ ...current, aiModel: value }))}
+                style={styles.input}
+                placeholder="gpt-4.1-mini"
+                placeholderTextColor={theme.colors.placeholder}
+                autoCapitalize="none"
+              />
+            </View>
+
+            <View style={styles.fieldBlock}>
+              <Text style={styles.fieldLabel}>AI API key</Text>
+              <TextInput
+                value={adminSettings.aiApiKey}
+                onChangeText={value => setAdminSettings(current => ({ ...current, aiApiKey: value }))}
+                style={styles.input}
+                placeholder="Paste the API key stored for verification"
+                placeholderTextColor={theme.colors.placeholder}
+                autoCapitalize="none"
+                secureTextEntry
+              />
+            </View>
+
+            <View style={styles.previewCard}>
+              <Text style={styles.previewEmptyTitle}>What the AI engine does</Text>
+              <Text style={styles.previewEmptyBody}>It reviews the OCR text and your local parser output, then returns only the fields you care about: Full Name, Company, Title, Mobile Phone, Office Phone, Email, Website, Address, and Notes.</Text>
+            </View>
+
+            {aiState.status !== "idle" ? (
+              <View style={[
+                styles.syncStateBox,
+                aiState.status === "success" ? styles.syncStateSuccess : aiState.status === "error" ? styles.syncStateError : styles.syncStateProgress
+              ]}>
+                <Text style={styles.syncStateTitle}>
+                  {aiState.status === "success" ? "AI verification ready" : aiState.status === "error" ? "AI verification error" : "AI verification in progress"}
+                </Text>
+                <Text style={styles.syncStateBody}>{aiState.message}</Text>
+              </View>
+            ) : null}
 
             <View style={styles.toggleRow}>
               <View style={styles.toggleCopy}>
@@ -896,21 +1028,34 @@ export function AppShell() {
               </View>
             ) : null}
 
-              <View style={styles.actionRow}>
+            <View style={styles.actionRow}>
               <Pressable
-                style={[styles.actionButton, styles.primaryButton, !adminSettings.googleSheetsWebhookUrl.trim() && styles.buttonDisabled]}
+                style={[styles.actionButton, styles.primaryButton, !hasAiVerificationConfigured(adminSettings) && styles.buttonDisabled]}
+                disabled={!hasAiVerificationConfigured(adminSettings)}
+                onPress={() => {
+                  void sendTestAiVerification();
+                }}
+              >
+                <Text style={styles.primaryButtonText}>Test AI engine</Text>
+              </Pressable>
+              <Pressable
+                style={[styles.actionButton, styles.secondaryButton, !adminSettings.googleSheetsWebhookUrl.trim() && styles.buttonDisabled]}
                 disabled={!adminSettings.googleSheetsWebhookUrl.trim()}
                 onPress={() => {
                   void sendTestSync();
                 }}
               >
-                <Text style={styles.primaryButtonText}>Send test payload</Text>
+                <Text style={styles.secondaryButtonText}>Test Sheets sync</Text>
               </Pressable>
+            </View>
+
+            <View style={styles.actionRow}>
               <Pressable
                 style={[styles.actionButton, styles.secondaryButton]}
                 onPress={() => {
                   setAdminSettings(defaultAdminSettings);
                   setSyncState({ status: "idle", message: "" });
+                  setAiState({ status: "idle", message: "" });
                 }}
               >
                 <Text style={styles.secondaryButtonText}>Reset admin</Text>

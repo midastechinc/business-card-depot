@@ -4,13 +4,21 @@ import { Platform } from "react-native";
 export type AdminSettings = {
   enableGoogleSheetsSync: boolean;
   googleSheetsWebhookUrl: string;
+  enableAiVerification: boolean;
+  aiApiUrl: string;
+  aiApiKey: string;
+  aiModel: string;
 };
 
 const STORAGE_KEY = "business-card-depot.admin-settings";
 
 export const defaultAdminSettings: AdminSettings = {
   enableGoogleSheetsSync: false,
-  googleSheetsWebhookUrl: ""
+  googleSheetsWebhookUrl: "",
+  enableAiVerification: false,
+  aiApiUrl: "https://api.openai.com/v1/chat/completions",
+  aiApiKey: "",
+  aiModel: "gpt-4.1-mini"
 };
 
 export async function loadAdminSettings(): Promise<AdminSettings> {
@@ -26,7 +34,17 @@ export async function loadAdminSettings(): Promise<AdminSettings> {
           ? parsed.googleSheetsWebhookUrl
           : typeof parsed?.listDatabaseUrl === "string"
             ? parsed.listDatabaseUrl
-            : ""
+            : "",
+      enableAiVerification: Boolean(parsed?.enableAiVerification),
+      aiApiUrl:
+        typeof parsed?.aiApiUrl === "string" && parsed.aiApiUrl.trim().length > 0
+          ? parsed.aiApiUrl
+          : defaultAdminSettings.aiApiUrl,
+      aiApiKey: typeof parsed?.aiApiKey === "string" ? parsed.aiApiKey : "",
+      aiModel:
+        typeof parsed?.aiModel === "string" && parsed.aiModel.trim().length > 0
+          ? parsed.aiModel
+          : defaultAdminSettings.aiModel
     };
   } catch {
     return defaultAdminSettings;
@@ -35,6 +53,15 @@ export async function loadAdminSettings(): Promise<AdminSettings> {
 
 export async function saveAdminSettings(settings: AdminSettings) {
   await writeValue(JSON.stringify(settings));
+}
+
+export function hasAiVerificationConfigured(settings: AdminSettings) {
+  return Boolean(
+    settings.enableAiVerification
+      && settings.aiApiUrl.trim()
+      && settings.aiApiKey.trim()
+      && settings.aiModel.trim()
+  );
 }
 
 async function readValue() {
